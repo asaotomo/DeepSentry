@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/AI-DeepSeek%20V3-blueviolet?style=flat-square" alt="AI">
 </p>
 
-[功能特性](#features) • [实战案例](#cases) • [快速开始](#quick-start) • [架构解析](#structure) • [安全说明](#safe)
+[功能特性](#features) • [实战案例](#cases) • [快速开始](#quick-start) • [项目架构](#structure) • [安全说明](#safe)
 
 </div>
 
@@ -224,7 +224,7 @@ go build -o deepsentry cmd/main.go
 
 ---
 
-## <span id="structure">📂 目录结构</span>
+## <span id="structure">📂 项目架构</span>
 ```latex
 DeepSentry/
 ├── cmd/                 # 入口文件 (Windows/Unix 兼容处理)
