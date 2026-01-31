@@ -147,7 +147,8 @@ DeepSentry 内置了基于大语言模型（LLM）的决策大脑，能够理解
 
 ```bash
 # 克隆项目
-git clone [https://github.com/Hx0-Team/DeepSentry.git](https://github.com/Hx0-Team/DeepSentry.git)
+git clone https://github.com/asaotomo/DeepSentry.git
+
 cd DeepSentry
 
 # ⚠️ [中国大陆用户必选] 配置 Go 代理，防止依赖下载失败
