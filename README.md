@@ -27,7 +27,7 @@ v2.0.4 起也可以：
 1. 在 **微信、QQ、企业微信、飞书、钉钉** 里私聊指挥（验证码回原任务，高危操作当场确认）。
 2. 对设备 **Web 控制台做网页巡检**，保留真实截图，一句话生成带封面的 **Word / Markdown**。
 
-<img width="1672" height="941" alt="DeepSentry 全屏终端界面" src="https://github.com/user-attachments/assets/db4362cf-1150-46bc-befb-9e0025bc4bc4" />
+<img width="1672" height="941" alt="Deepsentry2 0 4海报" src="https://github.com/user-attachments/assets/a04f8117-4856-41b4-b8d8-53ad05b5225e" />
 
 > **授权范围**：只允许在你拥有或已获得明确书面授权的系统上使用。禁止未授权扫描、入侵、破坏、绕过访问控制或任何违法用途。
 
