@@ -3,8 +3,8 @@
 # 支持 api_protocol: auto | openai_chat | anthropic_messages | openai_responses
 
 # 各 provider 的内置预设模型（model_name 留空时自动使用；可随时显式覆盖）:
-#   openai: gpt-5.6 | anthropic: claude-opus-5 | google: gemini-3.8-flash
-#   deepseek: deepseek-v4-flash-vision-exp | qwen: qwen3.7-plus | hunyuan/tencent_hy: hy4-preview
+#   openai: gpt-6-astra (ChatGPT 6) | anthropic: claude-fable-5-1 | google: gemini-3.8-flash
+#   deepseek: deepseek-flash | qwen: qwen3.8-max | hunyuan/tencent_hy: hy4-preview
 #   qianfan: qianfan-code-latest | volcengine: ark-code-latest | teleai/ctyun: GLM-5-Pro
 #   minimax: MiniMax-M3 | glm: glm-5.3-flash | mimo Token Plan / MiMo Claw: mimo-v2.5
 #   xai/grok: grok-4.6 | ollama: llama3.3 | lmstudio: local-model
@@ -13,7 +13,7 @@ provider: deepseek
 api_protocol: auto
 api_url: https://api.deepseek.com                  # 可只填 base，自动补 /chat/completions
 api_key: YOUR_API_KEY
-model_name: deepseek-v4-flash-vision-exp           # 默认推荐：1M 上下文、多模态图片输入
+model_name: deepseek-flash                         # 官方 API ID（产品名 V4.1 Flash）：1M 上下文、原生多模态图片输入
 temperature: 0.0                                  # 0~2；安全运维/比赛建议保持 0，减少随机漂移
 
 # Agent 运行时。v3 已是默认；遇到兼容问题可显式设为 legacy 回滚。
@@ -32,7 +32,7 @@ terminal_theme: auto                    # auto | dark | light
 #   - id: primary
 #     role: primary
 #     provider: deepseek
-#     model_name: deepseek-v4-flash-vision-exp
+#     model_name: deepseek-flash
 #     max_retries: 3
 #   - id: local-fallback
 #     role: fallback
@@ -63,8 +63,9 @@ context_utilization: 0              # 0=自动；可选 0.40~0.90，为输出和
 reserved_output_tokens: 0           # 0=按窗口自动；也是 API 的输出上限建议值
 native_tool_limit: 0                # 0=按 profile 自动；compact=8, balanced=20, full=全部
 vision_mode: auto                   # auto|enabled|disabled；内置官方模型目录优先，其次按名称保守识别
-# auto 已精确识别：deepseek-v4-flash-vision-exp、glm-5.3-flash、MiniMax-M3、mimo-v2.5、
-# gpt-5.6、claude-opus-5、gemini-3.8-flash、qwen3.7-plus。
+# auto 已精确识别：deepseek-flash、deepseek-v4-flash-vision-exp、glm-5.3-flash、
+# MiniMax-M3、mimo-v2.5、gpt-6-astra / gpt-6 / chatgpt-6、gpt-5.6、claude-opus-5、
+# claude-sonnet-5、claude-haiku-4-5、gemini-3.8-flash、qwen3.8-max。
 # 已知纯文本变体不会因同厂商而误开图片；代理/自定义模型无法识别时再显式设 enabled。
 # 例：Gemini 1M 可显式填 1048576。Ollama/LM Studio 必须填实际 num_ctx/max_model_len，
 # 不要只按模型卡的理论上限；未配置的本地服务会先按 32768 安全窗口运行。
@@ -81,8 +82,15 @@ llm_timeout_sec: 120
 llm_retries: 3
 ssh_command_timeout_sec: 90
 ssh_max_output_bytes: 524288   # SSH 单命令回传上限（字节），超出截断不报错；大日志请配合 head/tail/wc
-max_steps: 30
-subagent_max_steps: 15         # 子 Agent 步数用户上限；AI 可按任务难度估算 task_max_steps，但不会超过这里
+max_steps: 30                  # 自适应开启时为主 Agent 初始规划窗口
+subagent_max_steps: 15         # 自适应开启时为子 Agent 初始规划窗口
+execution_budget:
+  enabled: true               # false 恢复原固定步数行为
+  max_steps: 180              # 主 Agent 单次执行的硬上限
+  subagent_max_steps: 90      # 单个子 Agent 硬上限
+  total_steps: 300            # 主 Agent 与所有子 Agent 共享模型调用预算
+  extension_steps: 15         # 有新工具结果时自动续步
+  no_progress_steps: 8        # 连续无新结果时保存进度并暂停
 
 # 控制端出站代理（可选）：统一影响 LLM、MCP HTTP、HTTP/Web、TCP/CIDR/数据库探测、
 # SSH/Telnet/FTP 目标连接和无头浏览器。也可启动时用 -proxy 或 -socks5 临时覆盖。
@@ -267,12 +275,15 @@ ftp_transfer_timeout_sec: 90
 #     required: false
 #     disabled: false
 #
-# HawkEye MCP 深度适配示例（路径换成本机实际位置）：
+# HawkEye MCP 1.0.7 深度适配示例（路径换成本机实际位置）：
 #   - name: hawkeye
 #     type: stdio
 #     command: node
-#     args: ["/absolute/path/Hx0-HawkEye/mcp-server/hawkeye-mcp-server.mjs"]
-#     # 0/省略 = 使用 DeepSentry 的 HawkEye 分工具超时：Research 205s，
+#     args:
+#       - /absolute/path/DeepSentry-deepagent/hawkeye-mcp-server.mjs
+#       - --profile
+#       - full
+#     # 0/省略 = DeepSentry 客户端超时略高于 Server：Research 205s，
 #     # Search/Fetch/Captcha/Fuzz 130s，快照/导航等 100s，其余 60s。
 #     # 如显式填写 tool_timeout_sec，则始终以用户值为准。
 #     tool_timeout_sec: 0
@@ -284,3 +295,29 @@ ftp_transfer_timeout_sec: 90
 # 用户在 TUI 中要求“添加 skill 路径 / 添加 MCP / 保存 SSH 目标”时，
 # Agent 会使用 config_manage 工具更新本机 config.yaml，并在写入前自动备份到
 # .deepsentry_backups/config_<timestamp>.yaml。
+
+# 聊天控制服务：TUI 输入 /connect，或运行 deepsentry --chat-setup -c config.yaml。
+# 飞书、QQ、微信提供扫码绑定；企业微信打开官方扫码弹窗后配对控制账号。
+# 扫码凭据自动保存在 binding_file，文件权限 0600，不写入 YAML、不回传给模型。
+chat:
+  listen: "127.0.0.1:8787"            # 回调服务；长连接/微信轮询不需要公网地址
+  store: reports/chat/jobs.json
+  binding_file: reports/chat/connections.json
+  task_timeout_sec: 1800
+  max_concurrent: 5                  # 最多 5 路并发任务；不同会话隔离，同一私聊排队续跑
+  progress_interval_sec: 30          # 公开步骤/工具进度推送最小间隔；/status 随时查看
+  progress_max_messages: 3           # 每任务最多推送次数（QQ 进一步限制为 1 次）
+  transcription_url: ""             # 可选：OpenAI 兼容 /v1/audio/transcriptions 的完整 HTTPS URL
+  transcription_key_env: ""         # 转写服务密钥的环境变量名，不在这里填写密钥
+  transcription_model: "whisper-1"  # 按所用转写服务填写；微信/企微自带转写文字时无需调用
+
+  allow_batch: false                 # 手动通道的任务执行开关；扫码通道在窗口中单独授权
+  wecom_source: deepsentry           # 企业微信授权来源；平台要求开通时填其分配的标识
+  channels: []                      # 扫码通道自动加载；手动配置示例见 docs/聊天机器人接入.md
+
+# 巡检：设备清单见 inspection.example.yaml（聊天 + 鹰眼；可选 command / 选择器做固定采集）。
+inspection:
+  output_dir: reports/inspections
+  concurrency: 3
+  device_timeout_sec: 180
+  devices: []

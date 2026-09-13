@@ -97,13 +97,19 @@ func TestOfficialChineseMultimodalModelsAreAutoDetected(t *testing.T) {
 		model    string
 		context  int
 	}{
+		{"deepseek", "deepseek-flash", 1_000_000},
+		{"deepseek", "deepseek-v4.1-flash", 1_000_000},
 		{"deepseek", "deepseek-v4-flash-vision-exp", 1_000_000},
 		{"glm", "glm-5.3-flash", 1_000_000},
 		{"minimax", "MiniMax-M3", 1_000_000},
 		{"mimo", "mimo-v2.5", 1_000_000},
+		{"openai", "gpt-6-astra", 1_050_000},
 		{"openai", "gpt-5.6", 1_050_000},
 		{"anthropic", "claude-opus-5", 1_000_000},
+		{"anthropic", "claude-sonnet-5", 1_000_000},
+		{"anthropic", "claude-haiku-4-5", 200_000},
 		{"google", "gemini-3.8-flash", 1_048_576},
+		{"qwen", "qwen3.8-max", 1_000_000},
 		{"qwen", "qwen3.7-plus", 1_000_000},
 	} {
 		capabilities := (Config{Provider: test.provider, ModelName: test.model, VisionMode: "auto"}).EffectiveModelCapabilities()

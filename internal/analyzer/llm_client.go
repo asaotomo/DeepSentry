@@ -122,7 +122,7 @@ func CallLLMWithRetryContext(ctx context.Context, messages []Message, useNativeT
 }
 
 func callLLMOnce(ctx context.Context, cfg config.Config, messages []Message, useNativeTools bool, onStream func(string)) (LLMResult, error) {
-	native := useNativeTools && cfg.IsOpenAICompatible()
+	native := useNativeTools && cfg.IsOpenAICompatible() && !isAstraModel(cfg.ModelName)
 	if cfg.IsAnthropic() {
 		return callAnthropic(ctx, cfg, messages)
 	}
@@ -241,14 +241,7 @@ type responsesResponse struct {
 }
 
 func callOpenAIResponses(ctx context.Context, cfg config.Config, messages []Message) (LLMResult, error) {
-	url := strings.TrimRight(cfg.ApiURL, "/")
-	if !strings.HasSuffix(url, "/responses") {
-		if strings.HasSuffix(url, "/v1") {
-			url += "/responses"
-		} else {
-			url += "/v1/responses"
-		}
-	}
+	url := config.NormalizeAPIURL(cfg.ApiURL, config.ProtocolOpenAIResponses)
 	input, err := buildOpenAIResponsesInput(messages)
 	if err != nil {
 		return LLMResult{}, err
@@ -258,6 +251,9 @@ func callOpenAIResponses(ctx context.Context, cfg config.Config, messages []Mess
 		Input:           input,
 		Temperature:     effectiveTemperature(cfg),
 		MaxOutputTokens: cfg.EffectiveModelCapabilities().ReservedOutputTokens,
+	}
+	if isAstraModel(cfg.ModelName) {
+		reqBody.Temperature = 0
 	}
 	body, status, err := doHTTPPost(ctx, url, cfg, reqBody)
 	if err != nil {
@@ -668,10 +664,15 @@ func callOpenAICompatibleStream(ctx context.Context, url string, cfg config.Conf
 }
 
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
+	Model        string                 `json:"model"`
+	MaxTokens    int                    `json:"max_tokens"`
+	System       string                 `json:"system,omitempty"`
+	Messages     []anthropicMessage     `json:"messages"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+type anthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -693,10 +694,12 @@ type anthropicImageSource struct {
 
 type anthropicResponse struct {
 	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking,omitempty"`
 	} `json:"content"`
-	Error *struct {
+	StopReason string `json:"stop_reason,omitempty"`
+	Error      *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Usage struct {
@@ -706,7 +709,7 @@ type anthropicResponse struct {
 }
 
 func callAnthropic(ctx context.Context, cfg config.Config, messages []Message) (LLMResult, error) {
-	url := config.NormalizeChatURL(cfg.ApiURL)
+	url := config.NormalizeAPIURL(cfg.ApiURL, config.ProtocolAnthropicMessages)
 	var system strings.Builder
 	var msgs []anthropicMessage
 	for _, m := range messages {
@@ -755,9 +758,12 @@ func callAnthropic(ctx context.Context, cfg config.Config, messages []Message) (
 
 	reqBody := anthropicRequest{
 		Model:     cfg.ModelName,
-		MaxTokens: cfg.EffectiveModelCapabilities().ReservedOutputTokens,
+		MaxTokens: anthropicMaxTokens(cfg),
 		System:    strings.TrimSpace(system.String()),
 		Messages:  msgs,
+	}
+	if effort := anthropicEffort(cfg.ModelName); effort != "" {
+		reqBody.OutputConfig = &anthropicOutputConfig{Effort: effort}
 	}
 
 	raw, err := json.Marshal(reqBody)
@@ -794,18 +800,59 @@ func callAnthropic(ctx context.Context, cfg config.Config, messages []Message) (
 	if ar.Error != nil {
 		return LLMResult{}, errors.New(ar.Error.Message)
 	}
-	var text strings.Builder
+	var text, thinking strings.Builder
 	for _, c := range ar.Content {
-		if c.Type == "text" {
+		switch c.Type {
+		case "text":
 			text.WriteString(c.Text)
+		case "thinking":
+			thinking.WriteString(c.Thinking)
 		}
+	}
+	if strings.EqualFold(ar.StopReason, "refusal") {
+		msg := strings.TrimSpace(text.String())
+		if msg == "" {
+			msg = "模型拒绝回答"
+		}
+		return LLMResult{}, fmt.Errorf("Anthropic 拒绝回答: %s", msg)
 	}
 	usage := TokenUsage{
 		PromptTokens:     ar.Usage.InputTokens,
 		CompletionTokens: ar.Usage.OutputTokens,
 		TotalTokens:      ar.Usage.InputTokens + ar.Usage.OutputTokens,
 	}
-	return LLMResult{Content: text.String(), Usage: usage}, nil
+	return LLMResult{Content: text.String(), ReasoningContent: thinking.String(), Usage: usage}, nil
+}
+
+// anthropicMaxTokens reserves room for Claude 5 adaptive thinking, which shares
+// the max_tokens budget. Operators can still pin ReservedOutputTokens.
+func anthropicMaxTokens(cfg config.Config) int {
+	if cfg.ReservedOutputTokens > 0 {
+		return cfg.ReservedOutputTokens
+	}
+	if anthropicUsesAdaptiveThinking(cfg.ModelName) {
+		return 65536
+	}
+	return cfg.EffectiveModelCapabilities().ReservedOutputTokens
+}
+
+func anthropicEffort(model string) string {
+	if anthropicUsesAdaptiveThinking(model) {
+		return "high"
+	}
+	return ""
+}
+
+func anthropicUsesAdaptiveThinking(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" || strings.Contains(m, "haiku") {
+		return false
+	}
+	return strings.Contains(m, "claude-opus-5") ||
+		strings.Contains(m, "claude-sonnet-5") ||
+		strings.Contains(m, "claude-fable-5") ||
+		strings.Contains(m, "claude-opus-4-8") ||
+		strings.Contains(m, "claude-opus-4-7")
 }
 
 func recentToolSelectionContext(messages []Message, maxBytes int) string {
@@ -979,4 +1026,24 @@ func truncateHistoryFallbackToBudget(history *[]Message, keepRecent int, pinnedC
 		trimmed = selected
 	}
 	*history = append([]Message{contextMessage}, trimmed...)
+}
+
+func isAstraModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return m == "gpt-6-astra" || strings.HasPrefix(m, "gpt-6-astra-20")
+}
+
+// Astra accepts Chat Completions for text, but rejects sampling parameters.
+// Keep other models' explicit temperature=0 behavior unchanged.
+func (r ChatRequest) MarshalJSON() ([]byte, error) {
+	type plain ChatRequest
+	if !isAstraModel(r.Model) {
+		return json.Marshal(plain(r))
+	}
+	return json.Marshal(struct {
+		plain
+		Temperature         *float64 `json:"temperature,omitempty"`
+		MaxTokens           *int     `json:"max_tokens,omitempty"`
+		MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"`
+	}{plain: plain(r), MaxCompletionTokens: r.MaxTokens})
 }

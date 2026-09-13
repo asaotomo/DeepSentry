@@ -24,9 +24,15 @@ DeepSentry — AI 安全应急 Agent
   deepsentry --batch -y "自动巡检目标机 /proc"
   deepsentry --scheduler -c config.yaml       # 仅运行定时任务调度器
   deepsentry --resume session_abc123
+  deepsentry --session session_chat_demo --task "继续排查"
   deepsentry --list-sessions
   deepsentry --list-sessions --json
   deepsentry --init                         # 重新运行配置向导
+  deepsentry --chat-setup-cli -c config.yaml # SSH/CMD 终端连接向导
+  deepsentry --inspect -c config.yaml        # 多设备巡检，输出 Word/Markdown
+  deepsentry --chat-setup -c config.yaml    # 扫码连接飞书/QQ/微信/企微
+  deepsentry --chat -c config.yaml          # 仅运行聊天控制服务
+  deepsentry --chat-stop                    # 停止仍在运行的聊天服务
 
   deepsentry --tui --pick-session              # TUI 选择恢复会话
   # TUI 内输入 /tsecbench 可进入 TSecBench 跑分模式
@@ -46,16 +52,24 @@ DeepSentry — AI 安全应急 Agent
   -socks5 string     SOCKS5 出站代理（与 -proxy 互斥）
   -json             经典模式输出 JSONL 事件
   -quiet            经典模式仅输出关键结果和错误
+  -reply-final      仅输出最终任务结论（供聊天机器人回复）
   -webshell         WebShell/非 TTY 友好模式（提交后台执行，立即返回报告/进度路径）
   --no-color        禁用彩色输出（默认启用颜色）
   --theme string    TUI 主题：auto（默认）| dark | light
+  -chat             运行聊天机器人控制服务
+  -chat-setup-cli   终端选平台、扫码/输入凭据、状态/连接检查和解绑
+  -inspect          执行 inspection.devices 配置的巡检
+  -inspect-selector 设备名称、标签或 all
+  -chat-setup       打开通讯工具连接窗口（飞书/QQ/微信/企微扫码；钉钉手动配置）
+  -chat-stop        停止仍在运行的聊天服务
   -scheduler        仅运行本地定时任务调度器
   -version          显示版本
   -pick-session     配合 --tui，图形化选择 checkpoint 会话
   -batch            无人值守模式（自动批准操作）
   -y                配合 -batch，跳过 batch 模式二次确认
   -init             强制重新配置 LLM / SSH
-  -resume string    从 checkpoint 恢复会话
+  -resume string    从 checkpoint 恢复会话（必须已存在）
+  -session string   绑定会话 ID（存在则恢复并追加任务，不存在则新建）
   -list-sessions    列出可恢复的会话 ID
 
 退出码:

@@ -97,3 +97,23 @@ func TestQuietSinkSuppressesCommandOutputStream(t *testing.T) {
 		t.Fatalf("quiet sink should keep final result, got:\n%s", out)
 	}
 }
+
+func TestFinalReplySinkOnlyPrintsConclusion(t *testing.T) {
+	out := captureStdout(func() {
+		s := NewFinalReplySink()
+		s.Emit(UIEvent{Kind: EventStepStart, Step: 1, MaxSteps: 30})
+		s.Emit(UIEvent{Kind: EventThought, Message: "检查磁盘"})
+		s.Emit(UIEvent{Kind: EventAction, Action: &AgentAction{Type: ActionExecute, Command: "df -h"}})
+		s.Emit(UIEvent{Kind: EventBatchAuto})
+		s.Emit(UIEvent{Kind: EventResult, Message: "命令执行完成", Detail: "/dev/disk3s1 460Gi"})
+		s.Emit(UIEvent{Kind: EventFinish, Message: "磁盘使用率正常，根分区约 35%。"})
+	})
+	for _, ban := range []string{"想法", "命令", "df -h", "Batch", "Step", "结果", "最终报告", "==="} {
+		if strings.Contains(out, ban) {
+			t.Fatalf("final reply leaked %q:\n%s", ban, out)
+		}
+	}
+	if !strings.Contains(out, "磁盘使用率正常") {
+		t.Fatalf("missing conclusion:\n%s", out)
+	}
+}

@@ -1995,6 +1995,7 @@ func TestConfirmAcceptsUppercaseAndEnterSafelyRejects(t *testing.T) {
 	}{
 		{name: "uppercase approve", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}}, decision: approvalAllowOnce},
 		{name: "session approve", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, decision: approvalAllowSession},
+		{name: "allow all session", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}, decision: approvalAllowAllSession},
 		{name: "enter rejects", key: tea.KeyMsg{Type: tea.KeyEnter}, decision: approvalDeny},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

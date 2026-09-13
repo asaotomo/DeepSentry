@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -249,6 +250,52 @@ func TestHawkEyeNavigateAutoRecoversStaleBindingThroughTabsNew(t *testing.T) {
 	}
 	if !strings.Contains(out, "自动修复") || recovered.Action != "new" || recovered.URL != "https://example.test/video" || !recovered.Active || !recovered.Bind {
 		t.Fatalf("stale binding was not recovered safely: out=%q args=%#v", out, recovered)
+	}
+}
+
+func TestConnectReusesOccupiedHawkEyePortViaStreamableHTTP(t *testing.T) {
+	CloseAll()
+	t.Cleanup(CloseAll)
+
+	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "hawkeye-reuse", Version: "1"}, nil)
+	sdkmcp.AddTool(server, &sdkmcp.Tool{Name: "browser_snapshot", Description: "probe"},
+		func(_ context.Context, _ *sdkmcp.CallToolRequest, _ any) (*sdkmcp.CallToolResult, any, error) {
+			return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "ok"}}}, nil, nil
+		})
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return server }, nil)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" && r.URL.Path != "/mcp/" {
+			http.NotFound(w, r)
+			return
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/"
+		handler.ServeHTTP(w, r2)
+	}))
+	t.Cleanup(httpServer.Close)
+	u, err := url.Parse(httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ServerConfig{
+		Name:    "hx0-hawkeye-occupied",
+		Type:    "stdio",
+		Command: "node",
+		Args:    []string{"/tmp/hawkeye-mcp-server.mjs", "--port", u.Port()},
+	}
+	if err := Connect(cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { Disconnect(cfg.Name) })
+	sdkConnections.RLock()
+	conn := sdkConnections.byName[cfg.Name]
+	sdkConnections.RUnlock()
+	if conn == nil || conn.transport != "streamable_http" || conn.status.State != "connected" {
+		t.Fatalf("occupied HawkEye port should connect via Streamable HTTP: %#v", conn)
+	}
+	got, err := Global().Run(cfg.Name+"__browser_snapshot", map[string]string{})
+	if err != nil || !strings.Contains(got, "ok") {
+		t.Fatalf("reused HawkEye tool=%q err=%v", got, err)
 	}
 }
 

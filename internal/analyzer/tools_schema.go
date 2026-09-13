@@ -369,6 +369,7 @@ func hawkEyeTaskIntent(query string) bool {
 		"抓包", "流量", "请求头", "请求体", "capture", "traffic", "request", "header", "body",
 		"拦截", "改包", "intercept", "release", "drop", "fuzz", "重放", "replay", "截图", "captcha",
 		"播放", "倍速", "全屏", "视频", "watch", "play", "fullscreen",
+		"证书", "tls", "验证码", "site:", "filetype:",
 	} {
 		if strings.Contains(query, value) {
 			return true
@@ -390,14 +391,16 @@ func hawkEyeMCPContextScore(name, query string) int {
 	captureIntent := containsAny("抓包", "流量", "请求头", "请求体", "响应", "capture", "traffic", "request", "header", "body")
 	interceptIntent := containsAny("拦截", "改包", "放行", "丢弃", "intercept", "release", "drop")
 	securityIntent := containsAny("安全", "渗透", "漏洞", "审计", "ctf", "fuzz", "重放", "敏感", "暗链", "security", "pentest", "replay")
-	visualIntent := containsAny("截图", "图片", "视觉", "验证码", "screenshot", "image", "visual", "captcha")
-	researchIntent := containsAny("搜索", "调研", "资料", "research", "search")
+	visualIntent := containsAny("截图", "图片", "视觉", "screenshot", "image", "visual")
+	captchaIntent := containsAny("验证码", "captcha", "滑块", "checkcode")
+	researchIntent := containsAny("搜索", "调研", "资料", "research", "search", "site:", "filetype:")
+	tlsIntent := containsAny("证书", "tls", "不安全", "certificate", "hostname mismatch")
 	activationIntent := containsAny("全屏", "真实手势", "真鼠标", "剪贴板", "useractivation", "fullscreen", "trusted")
 	playbackIntent := containsAny("播放", "倍速", "2倍", "2x", "playback", "speed", "视频", "b站", "bilibili")
 	fileIntent := containsAny("上传", "下载", "文件", "upload", "download", "file")
 	scriptIntent := containsAny("脚本", "注入", "编解码", "javascript", "script", "evaluate", "codec")
 	findingIntent := containsAny("报告", "发现", "敏感", "暗链", "finding", "sensitive", "darklink")
-	if !(browserIntent || captureIntent || interceptIntent || securityIntent || visualIntent || researchIntent || activationIntent || playbackIntent || fileIntent || scriptIntent || findingIntent || containsAny("hawkeye", "鹰眼", "hx0")) {
+	if !(browserIntent || captureIntent || interceptIntent || securityIntent || visualIntent || captchaIntent || researchIntent || tlsIntent || activationIntent || playbackIntent || fileIntent || scriptIntent || findingIntent || containsAny("hawkeye", "鹰眼", "hx0")) {
 		return 0
 	}
 	score := 0
@@ -428,7 +431,14 @@ func hawkEyeMCPContextScore(name, query string) int {
 		add(550, "hawkeye_capture_history", "hawkeye_capture_inspect", "hawkeye_sensitive_scan", "hawkeye_darklink_scan", "hawkeye_findings", "hawkeye_fuzz_run", "browser_security")
 	}
 	if visualIntent {
-		add(900, "browser_screenshot", "browser_snapshot", "browser_captcha_assist")
+		add(900, "browser_screenshot", "browser_snapshot")
+	}
+	if captchaIntent {
+		add(1100, "browser_captcha_assist", "browser_snapshot")
+		add(400, "browser_type")
+	}
+	if tlsIntent {
+		add(1100, "browser_security", "browser_snapshot")
 	}
 	if researchIntent {
 		add(800, "browser_research", "browser_search", "browser_fetch", "browser_read_text")

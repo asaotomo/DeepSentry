@@ -95,7 +95,7 @@ func PlanTask(input PlanInput, now time.Time) (Plan, error) {
 	notes = append(notes, timeNotes...)
 	if task.Kind == KindInspection {
 		task.Report = true
-		notes = append(notes, "巡检类任务将使用固定只读检查命令生成 Markdown 报告")
+		notes = append(notes, "巡检类任务优先使用 inspection.devices 设备检查项生成 Word/Markdown；未配置时只做基础状态采集")
 	}
 	if task.Kind == KindAgent && !task.AllowBatch {
 		notes = append(notes, "泛化 Agent 定时任务默认不会无人值守执行；如确需 batch，创建时显式 allow_batch=true")

@@ -55,10 +55,33 @@ func readTargetOrLocalWithExecutor(path string, ex executor.Executor) ([]byte, e
 		}
 		return executor.ReadLocalFile(path)
 	}
+	if isReadableReportArtifact(path) {
+		return readLocalReportArtifact(path)
+	}
 	if ex == nil {
 		return nil, fmt.Errorf("执行器未初始化")
 	}
 	return executor.ReadFileWithExecutor(ex, path)
+}
+
+func readLocalReportArtifact(path string) ([]byte, error) {
+	if !isReadableReportArtifact(path) {
+		return nil, fmt.Errorf("禁止读取受保护路径")
+	}
+	abs, err := filepath.Abs(expandUserPath(path))
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("报告文件不可读取")
+	}
+	return io.ReadAll(io.LimitReader(f, 2<<20))
 }
 
 func writeTargetOrLocalWithExecutor(path string, content []byte, ex executor.Executor) error {

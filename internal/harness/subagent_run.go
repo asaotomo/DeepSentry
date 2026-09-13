@@ -18,6 +18,8 @@ import (
 
 // SubAgentRunner 子 Agent 运行器（复用 harness middleware，无 sub-sub-agent）
 type SubAgentRunner struct {
+	budgetPolicy config.ExecutionBudgetConfig
+	budgetLedger *executionLedger
 	Middleware   []Middleware
 	State        *AgentState
 	SharedState  *AgentState // 主 Agent 会话线索板；并发子 Agent 只共享高信号线索，不共享原始对话
@@ -48,12 +50,14 @@ func NewSubAgentRunner(parent *DeepAgent) *SubAgentRunner {
 		fmt.Sprintf("%s-sub-%d", parent.SessionID, subAgentRunSequence.Add(1)))
 	state.ReplaceCoreClues(parent.State.CoreCluesSnapshot())
 	return &SubAgentRunner{
-		Middleware:  SubAgentMiddlewareStack(parent.Catalog, parent.MemoryStore),
-		State:       state,
-		SharedState: parent.State,
-		Catalog:     parent.Catalog,
-		MemoryStore: parent.MemoryStore,
-		UseNative:   parent.UseNativeTools,
+		budgetPolicy: parent.budgetPolicy,
+		budgetLedger: parent.budgetLedger,
+		Middleware:   SubAgentMiddlewareStack(parent.Catalog, parent.MemoryStore),
+		State:        state,
+		SharedState:  parent.State,
+		Catalog:      parent.Catalog,
+		MemoryStore:  parent.MemoryStore,
+		UseNative:    parent.UseNativeTools,
 	}
 }
 
@@ -70,6 +74,13 @@ func (r *SubAgentRunner) Run(spec subagent.Spec, taskPrompt string, sysCtx colle
 
 	maxSteps := resolveSubAgentMaxSteps(spec, subAgentAssignmentForEstimate(taskPrompt), r.TaskMaxSteps, r.MaxStepsCap)
 
+	var lease *executionLease
+	if r.budgetPolicy.Enabled {
+		lease = newExecutionLease(maxSteps, true, r.budgetPolicy)
+		maxSteps = lease.limit
+	}
+	stopReason := "max_steps"
+
 	extraBase := spec.SystemPrompt + `
 【子 Agent 模式】
 - Shell-first：优先使用 execute 执行目标机原生 Shell 直接排查；原生命令能完成时不要先调用 tool/tool_catalog
@@ -82,7 +93,18 @@ func (r *SubAgentRunner) Run(spec subagent.Spec, taskPrompt string, sysCtx colle
 
 	var results []string
 
-	for step := 0; step < maxSteps; step++ {
+	for step := 0; ; step++ {
+		if lease != nil {
+			allowed, reason := lease.allow(step)
+			if !allowed {
+				stopReason = reason
+				break
+			}
+			maxSteps = lease.limit
+		} else if step >= maxSteps {
+			break
+		}
+
 		if shouldStop(r.Stop) {
 			return fmt.Sprintf("子 Agent [%s] 已按用户请求停止。", spec.Name), nil
 		}
@@ -102,6 +124,9 @@ func (r *SubAgentRunner) Run(spec subagent.Spec, taskPrompt string, sysCtx colle
 			r.State.ReplaceCoreClues(r.SharedState.CoreCluesSnapshot())
 		}
 		extraPrompt := extraBase
+		if lease != nil {
+			extraPrompt += lease.prompt(step, r.budgetLedger)
+		}
 		for _, mw := range r.Middleware {
 			extraPrompt = mw.EnhancePrompt(extraPrompt, r.State)
 		}
@@ -109,6 +134,13 @@ func (r *SubAgentRunner) Run(spec subagent.Spec, taskPrompt string, sysCtx colle
 		stepFn := r.StepFn
 		if stepFn == nil {
 			stepFn = analyzer.RunAgentStepWithOptions
+		}
+		if lease != nil {
+			if !r.budgetLedger.take(true) {
+				stopReason = "shared_step_budget"
+				break
+			}
+			lease.stalled++
 		}
 		llmCtx, cancelLLM := contextFromStop(r.Stop)
 		resp, err := stepFn(analyzer.StepOptions{
@@ -229,6 +261,9 @@ func (r *SubAgentRunner) Run(spec subagent.Spec, taskPrompt string, sysCtx colle
 		agent := &DeepAgent{Middleware: r.Middleware, State: r.State, MemoryStore: r.MemoryStore}
 		prepareToolCallExecution(r.State, &action)
 		result, err := agent.HandleAction(stepCtx, &action)
+		if lease != nil {
+			lease.observe(action, result, err)
+		}
 		if err != nil {
 			failActionToolCalls(r.State, action)
 			return "", err
@@ -260,7 +295,10 @@ func (r *SubAgentRunner) Run(spec subagent.Spec, taskPrompt string, sysCtx colle
 	if len(summary) > 6000 {
 		summary = safeUTF8BytePrefix(summary, 6000) + "\n...(子 Agent 输出已截断)..."
 	}
-	return fmt.Sprintf("子 Agent [%s] 达到最大步数，部分结果:\n%s", spec.Name, summary), nil
+	if lease != nil {
+		return summary, &SubAgentIncompleteError{Reason: stopReason, Summary: summary}
+	}
+	return fmt.Sprintf("子 Agent [%s] 未完成，执行暂停（%s），部分结果:\n%s", spec.Name, stopReason, summary), nil
 }
 
 func (r *SubAgentRunner) observeCoreClues(text, source string) {

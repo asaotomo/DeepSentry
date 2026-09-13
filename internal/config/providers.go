@@ -63,12 +63,12 @@ type ModelPreset struct {
 var AllProviders = []ProviderPreset{
 	{
 		ID: ProviderOpenAI, DisplayName: "OpenAI",
-		APIURL: "https://api.openai.com/v1", Model: "gpt-5.6",
-		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: true,
+		APIURL: "https://api.openai.com/v1", Model: "gpt-6-astra",
+		AuthStyle: "bearer", Protocol: ProtocolOpenAIResponses, NativeTools: false,
 	},
 	{
 		ID: ProviderAnthropic, DisplayName: "Anthropic Claude",
-		APIURL: "https://api.anthropic.com/v1", Model: "claude-opus-5",
+		APIURL: "https://api.anthropic.com/v1", Model: "claude-fable-5-1",
 		AuthStyle: "x-api-key", Protocol: ProtocolAnthropicMessages, NativeTools: false,
 	},
 	{
@@ -78,12 +78,12 @@ var AllProviders = []ProviderPreset{
 	},
 	{
 		ID: ProviderDeepSeek, DisplayName: "DeepSeek",
-		APIURL: "https://api.deepseek.com", Model: "deepseek-v4-flash-vision-exp",
+		APIURL: "https://api.deepseek.com", Model: "deepseek-flash",
 		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: true,
 	},
 	{
 		ID: ProviderQwen, DisplayName: "Alibaba Qwen / DashScope",
-		APIURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", Model: "qwen3.7-plus",
+		APIURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", Model: "qwen3.8-max",
 		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: true,
 	},
 	{
@@ -157,8 +157,11 @@ var AllProviders = []ProviderPreset{
 // Chinese providers. Historical IDs that are still served remain available so
 // existing configs get correct routing without becoming the new default.
 var AllModelPresets = []ModelPreset{
+	{Provider: ProviderDeepSeek, ID: "deepseek-flash", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderDeepSeek, ID: "deepseek-v4.1-flash", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderDeepSeek, ID: "deepseek-v4.1-flash-expires-on-0910", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderDeepSeek, ID: "deepseek-v4-flash-vision-exp", ContextWindowTokens: 1_000_000, SupportsVision: true},
-	{Provider: ProviderDeepSeek, ID: "deepseek-v4-flash", ContextWindowTokens: 1_000_000},
+	{Provider: ProviderDeepSeek, ID: "deepseek-v4-flash", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderDeepSeek, ID: "deepseek-v4-pro", ContextWindowTokens: 1_000_000},
 	{Provider: ProviderGLM, ID: "glm-5.3-flash", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderGLM, ID: "glm-5.3", ContextWindowTokens: 1_000_000},
@@ -170,24 +173,38 @@ var AllModelPresets = []ModelPreset{
 	{Provider: ProviderMimo, ID: "mimo-v2.5", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderMimo, ID: "mimo-v2.5-pro", ContextWindowTokens: 1_000_000},
 	{Provider: ProviderMimo, ID: "mimo-v2.5-pro-ultraspeed", ContextWindowTokens: 1_000_000},
+	{Provider: ProviderOpenAI, ID: "gpt-6-astra", ContextWindowTokens: 1_050_000, SupportsVision: true},
+	{Provider: ProviderOpenAI, ID: "gpt-6", ContextWindowTokens: 1_050_000, SupportsVision: true},
+	{Provider: ProviderOpenAI, ID: "chatgpt-6", ContextWindowTokens: 1_050_000, SupportsVision: true},
+	{Provider: ProviderOpenAI, ID: "chatgpt6", ContextWindowTokens: 1_050_000, SupportsVision: true},
+	{Provider: ProviderOpenAI, ID: "gpt-6-sol", ContextWindowTokens: 1_050_000, SupportsVision: true},
+	{Provider: ProviderOpenAI, ID: "gpt-6-terra", ContextWindowTokens: 1_050_000, SupportsVision: true},
+	{Provider: ProviderOpenAI, ID: "gpt-6-luna", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.6", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.6-sol", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.6-terra", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.6-luna", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.5", ContextWindowTokens: 400_000, SupportsVision: true},
 	{Provider: ProviderAnthropic, ID: "claude-opus-5", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderAnthropic, ID: "claude-sonnet-5", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderAnthropic, ID: "claude-fable-5-1", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderAnthropic, ID: "claude-fable-5", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderAnthropic, ID: "claude-haiku-4-5", ContextWindowTokens: 200_000, SupportsVision: true},
+	{Provider: ProviderAnthropic, ID: "claude-haiku-4-5-20251001", ContextWindowTokens: 200_000, SupportsVision: true},
 	{Provider: ProviderAnthropic, ID: "claude-opus-4-8", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderGoogle, ID: "gemini-3.8-flash", ContextWindowTokens: 1_048_576, SupportsVision: true},
 	{Provider: ProviderGoogle, ID: "gemini-3.7-flash", ContextWindowTokens: 1_048_576, SupportsVision: true},
+	{Provider: ProviderGoogle, ID: "gemini-3.6-flash", ContextWindowTokens: 1_048_576, SupportsVision: true},
 	{Provider: ProviderGoogle, ID: "gemini-3.5-flash", ContextWindowTokens: 1_048_576, SupportsVision: true},
+	{Provider: ProviderGoogle, ID: "gemini-3.5-flash-lite", ContextWindowTokens: 1_048_576, SupportsVision: true},
 	{Provider: ProviderQwen, ID: "qwen3.8-max", ContextWindowTokens: 1_000_000, SupportsVision: true},
-	{Provider: ProviderQwen, ID: "qwen3.7-plus", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderQwen, ID: "qwen3.8-flash", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderQwen, ID: "qwen3.7-plus", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderHunyuan, ID: "hy4-preview", ContextWindowTokens: 1_000_000},
 	{Provider: ProviderHunyuan, ID: "hy3", ContextWindowTokens: 256_000},
 	{Provider: ProviderXAI, ID: "grok-4.6", ContextWindowTokens: 500_000, SupportsVision: true},
 	{Provider: ProviderXAI, ID: "grok-4.5", ContextWindowTokens: 500_000, SupportsVision: true},
+	{Provider: ProviderXAI, ID: "grok-4.3", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderXAI, ID: "grok-4", ContextWindowTokens: 256_000, SupportsVision: true},
 }
 
@@ -235,6 +252,24 @@ func FindProvider(id string) (ProviderPreset, bool) {
 	return ProviderPreset{}, false
 }
 
+// officialModelAliases maps marketing or retired IDs to the names the vendor
+// currently accepts. DeepSeek's product name is "V4.1 Flash", but the official
+// API only accepts deepseek-flash and deepseek-v4-pro.
+var officialModelAliases = map[string]string{
+	"deepseek-v4.1-flash":                 "deepseek-flash",
+	"deepseek-v4.1-flash-expires-on-0910": "deepseek-flash",
+}
+
+// CanonicalModelID rewrites known retired or marketing IDs to the official
+// request name. Unknown IDs are returned unchanged.
+func CanonicalModelID(model string) string {
+	key := strings.ToLower(strings.TrimSpace(model))
+	if alias, ok := officialModelAliases[key]; ok {
+		return alias
+	}
+	return strings.TrimSpace(model)
+}
+
 // ApplyProviderDefaults 根据 provider 填充空的 api_url / model_name
 func ApplyProviderDefaults(cfg *Config) {
 	if cfg == nil {
@@ -251,12 +286,14 @@ func ApplyProviderDefaults(cfg *Config) {
 				cfg.APIProtocol = ProtocolOpenAIChat
 			}
 		}
-		cfg.ApiURL = NormalizeChatURL(cfg.ApiURL)
+		cfg.ModelName = CanonicalModelID(cfg.ModelName)
+		cfg.ApiURL = NormalizeAPIURL(cfg.ApiURL, cfg.APIProtocol)
 		return
 	}
 	preset, ok := FindProvider(p)
 	if !ok {
-		cfg.ApiURL = NormalizeChatURL(cfg.ApiURL)
+		cfg.ModelName = CanonicalModelID(cfg.ModelName)
+		cfg.ApiURL = NormalizeAPIURL(cfg.ApiURL, cfg.APIProtocol)
 		return
 	}
 	if strings.TrimSpace(cfg.ApiURL) == "" {
@@ -268,7 +305,8 @@ func ApplyProviderDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.APIProtocol) == "" || strings.EqualFold(cfg.APIProtocol, ProtocolAuto) {
 		cfg.APIProtocol = preset.Protocol
 	}
-	cfg.ApiURL = NormalizeChatURL(cfg.ApiURL)
+	cfg.ModelName = CanonicalModelID(cfg.ModelName)
+	cfg.ApiURL = NormalizeAPIURL(cfg.ApiURL, cfg.APIProtocol)
 }
 
 // NormalizeChatURL 将 base URL 规范为 chat/completions 端点
@@ -365,4 +403,60 @@ func (c *Config) EffectiveSSHMaxOutputBytes() int {
 		return c.SSHMaxOutputBytes
 	}
 	return 512 * 1024
+}
+
+// NormalizeAPIURL selects the request endpoint without duplicating API versions.
+// Explicit protocol wins; custom gateway prefixes are preserved.
+func NormalizeAPIURL(raw, protocol string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return raw
+	}
+	suffix := ""
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case ProtocolOpenAIResponses:
+		suffix = "/responses"
+	case ProtocolAnthropicMessages:
+		suffix = "/messages"
+	default:
+		return NormalizeChatURL(raw)
+	}
+	for _, old := range []string{"/chat/completions", "/responses", "/messages"} {
+		if strings.HasSuffix(raw, old) {
+			raw = strings.TrimSuffix(raw, old)
+			break
+		}
+	}
+	return raw + suffix
+}
+
+// ProviderModelSuggestions contains currently selectable model IDs. Historical
+// capability entries are intentionally not offered as new configuration choices.
+func ProviderModelSuggestions(provider string) []string {
+	p, ok := FindProvider(canonicalProviderID(provider))
+	if !ok {
+		return nil
+	}
+	ids := []string{p.Model}
+	switch p.ID {
+	case ProviderOpenAI:
+		ids = append(ids, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+	case ProviderAnthropic:
+		ids = append(ids, "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
+	case ProviderGoogle:
+		ids = append(ids, "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+	case ProviderDeepSeek:
+		ids = append(ids, "deepseek-v4-pro")
+	case ProviderQwen:
+		ids = append(ids, "qwen3.8-flash", "qwen3.7-plus")
+	case ProviderMiniMax:
+		ids = append(ids, "MiniMax-M2.7", "MiniMax-M2.7-highspeed")
+	case ProviderMimo:
+		ids = append(ids, "mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed")
+	case ProviderGLM:
+		ids = append(ids, "glm-5.3")
+	case ProviderOllama, ProviderLMStudio:
+		return nil // installed model IDs are user-specific
+	}
+	return ids
 }

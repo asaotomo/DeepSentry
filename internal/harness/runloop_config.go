@@ -3,6 +3,7 @@ package harness
 import (
 	"ai-edr/internal/analyzer"
 	"ai-edr/internal/collector"
+	"ai-edr/internal/config"
 	"ai-edr/internal/executor"
 	"ai-edr/internal/logger"
 )
@@ -44,6 +45,8 @@ func (r RunResult) Successful() bool { return r.Status == RunStatusCompleted }
 
 // RunLoopConfig Agent 主循环配置
 type RunLoopConfig struct {
+	ExecutionBudget  *config.ExecutionBudgetConfig // nil inherits configured runtime policy
+	DrainInput       func() []analyzer.Message     // IM supplements, consumed only at model boundaries
 	SysCtx           collector.SystemContext
 	History          *[]analyzer.Message
 	Reporter         *logger.Reporter
@@ -54,6 +57,7 @@ type RunLoopConfig struct {
 	MaxSteps         int
 	SubAgentMaxSteps int
 	MultiTurn        bool // TUI 等多轮会话：finish 后保留上下文，支持追问
+	ChatReply        bool // 手机/IM 机器人续聊：更强的连续对话约束
 	PlanMode         bool // 先澄清/规划，再按计划执行
 	CompetitionMode  bool // 10 分钟运维比赛：快速取证、交叉验证、规范答题
 	ConfirmFn        func(*AgentAction) bool

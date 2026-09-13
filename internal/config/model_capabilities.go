@@ -189,7 +189,7 @@ func (c Config) effectiveVisionCapability() (bool, string) {
 		return preset.SupportsVision, "model-catalog"
 	}
 	hints := []string{
-		"vision", "multimodal", "gpt-4o", "gpt-4.1", "gpt-5", "claude-", "gemini-",
+		"vision", "multimodal", "gpt-4o", "gpt-4.1", "gpt-5", "gpt-6", "chatgpt-6", "chatgpt6", "claude-", "gemini-",
 		"qwen-vl", "qwen2-vl", "qwen3-vl", "deepseek-vl", "llava", "pixtral", "internvl", "minicpm-v",
 	}
 	for _, hint := range hints {

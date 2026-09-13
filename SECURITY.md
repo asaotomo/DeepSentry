@@ -6,6 +6,7 @@ Security fixes are provided for the latest published DeepSentry release.
 
 | Version | Supported |
 | --- | --- |
+| 2.0.4 | Yes |
 | 2.0.3 | Yes |
 | Earlier releases | No |
 

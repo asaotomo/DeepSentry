@@ -4,13 +4,16 @@ import (
 	"ai-edr/internal/analyzer"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"ai-edr/internal/chat"
 	"ai-edr/internal/config"
 	"ai-edr/internal/harness"
 	"ai-edr/internal/mcp"
@@ -25,7 +28,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+	"github.com/spf13/viper"
 )
+
+type chatSetupResultMsg struct{ err error }
 
 type logLine struct {
 	kind      string
@@ -54,6 +60,7 @@ const (
 	approvalDeny approvalDecision = iota
 	approvalAllowOnce
 	approvalAllowSession
+	approvalAllowAllSession
 )
 
 type askState struct {
@@ -104,6 +111,7 @@ var slashCommands = []slashCommand{
 	{Name: "tsecbench", Description: "进入 TSecBench 跑分模式；可追加题目或目标说明"},
 	{Name: "config", Description: "显示连接与模型配置"},
 	{Name: "sudo", Description: "由系统安全验证/刷新本机 sudo 授权（密码不进入程序）"},
+	{Name: "connect", Description: "连接通讯工具：扫码绑定飞书/QQ/微信/企微，钉钉可手动配置；Ctrl+C 返回终端并保持后台聊天"},
 	{Name: "mcp", Description: "MCP 管理：/mcp status|reconnect|add|import|resources|prompts"},
 	{Name: "skill", Description: "Skill 管理：list 查看；on/off [name] 启停；only <name> 仅启用一个"},
 	{Name: "exit", Description: "退出 TUI"},
@@ -154,10 +162,11 @@ type inputDraftPart struct {
 type AgentModel struct {
 	ctrl *SessionController
 
-	width, height int
-	viewport      viewport.Model
-	spinner       spinner.Model
-	input         textinput.Model
+	width, height    int
+	viewport         viewport.Model
+	spinner          spinner.Model
+	input            textinput.Model
+	inputAllSelected bool
 
 	title, statusLine string
 	currentTarget     string
@@ -191,6 +200,7 @@ type AgentModel struct {
 	pendingConfirm *confirmState
 	pendingAsk     *askState
 	quitting       bool
+	chatOwner      *chat.Owner
 	startupInfo    StartupInfo
 	bannerCache    string
 	bannerCacheW   int
@@ -205,6 +215,47 @@ type AgentModel struct {
 	copyToast     string
 	tokenUsage    tokenStats
 	trimmedLines  int
+}
+
+func (m *AgentModel) stopOwnedChat() {
+	if m == nil || m.chatOwner == nil {
+		return
+	}
+	_ = m.chatOwner.Stop(config.GlobalConfig.Chat)
+}
+
+func (m *AgentModel) ensureOwnedChat() error {
+	if m.chatOwner == nil {
+		m.chatOwner = &chat.Owner{}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cfgPath, err := filepath.Abs(viper.ConfigFileUsed())
+	if err != nil {
+		return err
+	}
+	return m.chatOwner.Ensure(config.GlobalConfig.Chat, chat.Handoff{
+		Executable: exe,
+		ConfigPath: cfgPath,
+		Proxy:      config.GlobalConfig.ControllerProxy,
+	})
+}
+
+func (m *AgentModel) startConfiguredChatIfNeeded() string {
+	ok, names := chat.ConfiguredChat(config.GlobalConfig.Chat)
+	if !ok {
+		return ""
+	}
+	if err := m.ensureOwnedChat(); err != nil {
+		return "已配置聊天绑定，但自动启动失败: " + err.Error()
+	}
+	label := strings.Join(names, "、")
+	if label == "" {
+		label = "已绑定通道"
+	}
+	return "已自动启动聊天服务（" + label + "）。退出 DeepSentry 时会一起停止。"
 }
 
 func NewAgentModel(ctrl *SessionController, title, status string, maxSteps int, awaitGoal, autoStart bool, startup StartupInfo) AgentModel {
@@ -242,6 +293,7 @@ func NewAgentModel(ctrl *SessionController, title, status string, maxSteps int, 
 		viewport:     vp,
 		input:        ti,
 		cursorAnchor: newInputCursorAnchorState(),
+		chatOwner:    &chat.Owner{},
 		lines:        []logLine{},
 		lineID:       0,
 		streamIdx:    -1,
@@ -264,6 +316,18 @@ func (m AgentModel) Init() tea.Cmd {
 
 func agentStartCmd(followUp bool) tea.Cmd {
 	return func() tea.Msg { return agentStartMsg{followUp: followUp} }
+}
+
+func isSelectAllKey(msg tea.KeyMsg) bool {
+	if msg.Type == tea.KeyCtrlA {
+		return true
+	}
+	switch msg.String() {
+	case "ctrl+a", "cmd+a", "meta+a":
+		return true
+	default:
+		return false
+	}
 }
 
 func isSubmitKey(msg tea.KeyMsg) bool {
@@ -398,6 +462,15 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case chatSetupResultMsg:
+		if msg.err != nil {
+			m.appendLine("error", "通讯工具窗口已退出: "+msg.err.Error(), "chat setup")
+		} else {
+			m.appendLine("info", "已返回终端。聊天服务由本进程托管，退出 DeepSentry 时会一起停止。再次 /connect 可管理绑定。", "chat setup")
+		}
+		m.recalcLayout()
+		m.refreshViewport()
+		return m, nil
 	case mcpResultMsg:
 		if msg.err != nil {
 			m.appendLine("error", "MCP "+msg.action+" 失败: "+msg.err.Error(), msg.err.Error())
@@ -414,11 +487,14 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case imageAttachResultMsg:
 		if msg.err != nil {
 			m.appendLine("error", "附加图片失败: "+msg.err.Error(), msg.err.Error())
-		} else if len(m.draftImages) >= analyzer.MaxImagesPerMessage {
+		} else if !m.inputAllSelected && len(m.draftImages) >= analyzer.MaxImagesPerMessage {
 			m.appendLine("error", fmt.Sprintf("单条消息最多允许 %d 张图片", analyzer.MaxImagesPerMessage), "too many images")
-		} else if draftImageBytes(m.draftImages)+msg.attachment.Size > analyzer.MaxImageBatchBytes {
+		} else if (!m.inputAllSelected && draftImageBytes(m.draftImages)+msg.attachment.Size > analyzer.MaxImageBatchBytes) || msg.attachment.Size > analyzer.MaxImageBatchBytes {
 			m.appendLine("error", fmt.Sprintf("单条消息图片总大小不能超过 %d MiB", analyzer.MaxImageBatchBytes>>20), "image batch too large")
 		} else {
+			if m.inputAllSelected {
+				m.clearInputDraft()
+			}
 			m.draftImages = append(m.draftImages, msg.attachment)
 			m.appendLine("info", fmt.Sprintf("✓ 已从%s附加图片：%s · %s · %.1f KiB", msg.source, msg.attachment.Name, msg.attachment.MediaType, float64(msg.attachment.Size)/1024), msg.attachment.Path)
 		}
@@ -604,6 +680,13 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Ignore complete leaked SGR mouse reports, but preserve literal pasted text.
+		if !msg.Paste && msg.Type == tea.KeyRunes {
+			msg.Runes = []rune(leakedMouseReport.ReplaceAllString(string(msg.Runes), ""))
+			if len(msg.Runes) == 0 {
+				return m, nil
+			}
+		}
 		key := msg.String()
 
 		if m.pendingConfirm != nil {
@@ -631,6 +714,22 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resolveLastConfirm(approvalAllowSession)
 				if ch != nil {
 					ch <- approvalAllowSession
+				}
+				if restoreInput {
+					m.input.Focus()
+				}
+				m.recalcLayout()
+				m.refreshViewport()
+				if restoreInput {
+					m.scheduleInputCursorAnchor()
+				}
+			case key == "s" || key == "S":
+				ch := m.pendingConfirm.respCh
+				restoreInput := m.pendingConfirm.restoreInput
+				m.pendingConfirm = nil
+				m.resolveLastConfirm(approvalAllowAllSession)
+				if ch != nil {
+					ch <- approvalAllowAllSession
 				}
 				if restoreInput {
 					m.input.Focus()
@@ -668,6 +767,11 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cancelInputCursorAnchor()
 				return m, tea.Quit
 			}
+			return m, nil
+		}
+
+		if m.inputFocused() && m.inputAllSelected && key == "esc" {
+			m.inputAllSelected = false
 			return m, nil
 		}
 
@@ -772,6 +876,26 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// 输入聚焦：仅处理输入相关快捷键，其余字符交给 textinput（避免 q/e/j/k 等全局键抢输入）
 		if m.inputFocused() {
+			if isSelectAllKey(msg) {
+				m.inputAllSelected = m.input.Value() != "" || len(m.draftParts) > 0 || len(m.draftImages) > 0
+				m.scheduleInputCursorAnchor()
+				return m, nil
+			}
+			if m.inputAllSelected {
+				switch key {
+				case "backspace", "delete":
+					m.clearInputDraft()
+					m.recalcLayout()
+					m.scheduleInputCursorAnchor()
+					return m, nil
+				case "left", "right", "home", "end", "up", "down", "ctrl+b", "ctrl+f", "ctrl+e", "tab":
+					m.inputAllSelected = false
+				default:
+					if msg.Type == tea.KeyRunes || key == "space" || key == "alt+enter" || key == "shift+enter" || key == "ctrl+j" {
+						m.clearInputDraft()
+					}
+				}
+			}
 			if isSubmitKey(msg) && m.pendingAsk != nil {
 				if cmd := m.submitAskResponse(); cmd != nil {
 					return m, cmd
@@ -1364,6 +1488,33 @@ func (m *AgentModel) handleSlashCommand(text string) tea.Cmd {
 		m.refreshViewport()
 		m.cursorAnchor.release()
 		return sudoValidationCmd(nil)
+	case cmd == "connect":
+		if m.running {
+			m.appendLine("error", "请等待当前任务结束后再打开通讯工具窗口。", text)
+			break
+		}
+		if err := m.ensureOwnedChat(); err != nil {
+			m.appendLine("error", "启动聊天服务失败: "+err.Error(), text)
+			break
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			m.appendLine("error", err.Error(), text)
+			break
+		}
+		cfgPath, err := filepath.Abs(viper.ConfigFileUsed())
+		if err != nil {
+			m.appendLine("error", err.Error(), text)
+			break
+		}
+		args := []string{"--chat-setup", "-c", cfgPath}
+		if proxy := config.GlobalConfig.ControllerProxy; proxy != "" {
+			args = append(args, "--proxy", proxy)
+		}
+		m.appendLine("info", "即将打开通讯工具连接窗口（飞书/QQ/微信/企微）。退出 DeepSentry 时，聊天进程会一起停止。", text)
+		m.refreshViewport()
+		m.cursorAnchor.release()
+		return tea.ExecProcess(exec.Command(exe, args...), func(err error) tea.Msg { return chatSetupResultMsg{err} })
 	case cmd == "mcp":
 		result := m.handleMCPSlash(arg)
 		m.refreshViewport()
@@ -2628,6 +2779,7 @@ func (m *AgentModel) moveInputCursorLine(delta int) bool {
 }
 
 func (m *AgentModel) clearInputDraft() {
+	m.inputAllSelected = false
 	m.draftParts = nil
 	m.draftImages = nil
 	m.input.SetValue("")
@@ -2639,6 +2791,9 @@ func (m *AgentModel) acceptPaste(text string) {
 	text = normalizeInputNewlines(text)
 	if text == "" {
 		return
+	}
+	if m.inputAllSelected {
+		m.clearInputDraft()
 	}
 	base := decodeInputValue(m.input.Value())
 	cursor := m.input.Position()
@@ -3427,6 +3582,8 @@ func (m *AgentModel) resolveLastConfirm(decision approvalDecision) {
 		switch decision {
 		case approvalAllowOnce:
 			m.lines[i].content = "✓ 已批准本次操作"
+		case approvalAllowAllSession:
+			m.lines[i].content = "✓ 已允许本次会话所有高危操作"
 		case approvalAllowSession:
 			m.lines[i].content = "✓ 已允许本会话同类操作"
 		}
@@ -3774,7 +3931,7 @@ func (m AgentModel) View() string {
 	if m.copyToast != "" {
 		help = m.copyToast
 	} else if m.pendingConfirm != nil {
-		help = "Y 仅本次 · A 本会话同类允许 · N/Esc 拒绝 · Enter 不批准"
+		help = "Y 仅本次 · A 本会话同类允许 · S 本次会话允许所有高危操作 · N/Esc 拒绝 · Enter 不批准"
 	} else if m.pendingAsk != nil {
 		help = "输入补充内容或选项编号 · Enter 继续 · Shift+Enter 换行"
 	} else {
@@ -3958,9 +4115,9 @@ func (m AgentModel) footerHelpText() string {
 	}
 	if m.inputFocused() {
 		if m.running {
-			return "Esc 中断 · Enter 发送 · Shift+Enter 换行 · " + pasteShortcutHelp() + " · ↑↓ 历史 · Ctrl+U 清空 · Tab 浏览"
+			return "Esc 中断 · Enter 发送 · Shift+Enter 换行 · Ctrl+A 全选 · " + pasteShortcutHelp() + " · ↑↓ 历史 · Ctrl+U 清空 · Tab 浏览"
 		}
-		return "Enter 发送 · Shift+Enter 换行 · " + pasteShortcutHelp() + " · ↑↓ 历史 · PgUp 翻阅 · Ctrl+Home/End 顶/底 · /help"
+		return "Enter 发送 · Shift+Enter 换行 · Ctrl+A 全选 · " + pasteShortcutHelp() + " · ↑↓ 历史 · PgUp 翻阅 · Ctrl+Home/End 顶/底 · /help"
 	}
 	if m.running {
 		return "Tab 输入新指令并 Enter 可中途打断 · Esc 停止 · ↑↓/jk 滚动 · g/Home 顶部 · G 底部 · e 全展/全折 · Y/N 确认"
@@ -4012,7 +4169,7 @@ func (m AgentModel) renderInputLine() string {
 	case m.running && !m.awaitGoal:
 		hint := "Agent 执行中..."
 		if m.pendingConfirm != nil {
-			hint = "等待确认 · Y 仅本次 / A 本会话 / N 拒绝"
+			hint = "等待确认 · Y 本次 / A 同类 / S 全部 / N 拒绝"
 		} else if m.pendingAsk != nil {
 			hint = "等待补充信息 · Tab 输入"
 		}
@@ -4129,6 +4286,9 @@ func (m AgentModel) focusedInputRows(width int) ([]string, int, int) {
 	}
 
 	textStyle := styleInputLine
+	if m.inputAllSelected && !placeholder {
+		textStyle = styleSelection
+	}
 	if placeholder {
 		textStyle = styleInfo.Background(colorSurface)
 	}

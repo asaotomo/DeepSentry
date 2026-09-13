@@ -106,6 +106,7 @@ type sdkConnection struct {
 	templates             []ExternalResourceTemplate
 	prompts               []ExternalPrompt
 	config                ServerConfig
+	ownedCmd              *exec.Cmd
 }
 
 var sdkConnections = struct {
@@ -205,8 +206,9 @@ func connectWithOAuthHandler(cfg ServerConfig, oauthHandler sdkauth.OAuthHandler
 	if transportName == "http" {
 		transportName = "streamable_http"
 	}
+	stdioCfg := cfg
 	if transportName == "stdio" {
-		if reused, ok := preferExistingHawkEyeHTTP(cfg); ok {
+		if reused, ok := shouldReuseHawkEyeHTTP(cfg); ok {
 			cfg = reused
 			transportName = "streamable_http"
 		}
@@ -270,18 +272,15 @@ func connectWithOAuthHandler(cfg ServerConfig, oauthHandler sdkauth.OAuthHandler
 	})
 
 	var transport sdkmcp.Transport
+	var ownedCmd *exec.Cmd
 	switch transportName {
 	case "stdio":
 		if strings.TrimSpace(cfg.Command) == "" {
 			cancel()
 			return fmt.Errorf("MCP stdio command 不能为空")
 		}
-		cmd := exec.Command(cfg.Command, cfg.Args...)
-		cmd.Env = mcpProcessEnvironment(os.Environ(), cfg.Env)
-		if strings.TrimSpace(cfg.CWD) != "" {
-			cmd.Dir = cfg.CWD
-		}
-		transport = &sdkmcp.CommandTransport{Command: cmd, TerminateDuration: 3 * time.Second}
+		ownedCmd = newOwnedStdioCommand(cfg)
+		transport = &sdkmcp.CommandTransport{Command: ownedCmd, TerminateDuration: 200 * time.Millisecond}
 	case "streamable_http":
 		if err := validateRemoteMCPURL(cfg.URL); err != nil {
 			cancel()
@@ -300,9 +299,20 @@ func connectWithOAuthHandler(cfg ServerConfig, oauthHandler sdkauth.OAuthHandler
 
 	session, err := client.Connect(connectCtx, transport, nil)
 	if err != nil {
-		cancel()
-		setFailedServerStatus(serverName, transportName, fingerprint, cfg, oauthHandler != nil, err)
-		return fmt.Errorf("MCP server %s 连接失败: %w", serverName, err)
+		forgetOwnedProcess(cfg, ownedCmd)
+		if retried, retryCfg, retryErr := retryHawkEyeHTTPAfterStdioFail(connectCtx, client, stdioCfg, transportName, oauthHandler, err); retryErr == nil {
+			cfg = retryCfg
+			transportName = "streamable_http"
+			ownedCmd = nil
+			session = retried
+			fingerprintRaw, _ = json.Marshal(cfg)
+			fingerprint = string(fingerprintRaw)
+			err = nil
+		} else {
+			cancel()
+			setFailedServerStatus(serverName, transportName, fingerprint, cfg, oauthHandler != nil, retryErr)
+			return fmt.Errorf("MCP server %s 连接失败: %w", serverName, retryErr)
+		}
 	}
 	init := session.InitializeResult()
 	conn = &sdkConnection{
@@ -315,6 +325,7 @@ func connectWithOAuthHandler(cfg ServerConfig, oauthHandler sdkauth.OAuthHandler
 		toolTimeout:         toolTimeout,
 		toolTimeoutExplicit: cfg.ToolTimeoutSec > 0,
 		config:              cfg,
+		ownedCmd:            ownedCmd,
 		status: ServerStatus{
 			Name:      serverName,
 			Transport: transportName,
@@ -328,15 +339,41 @@ func connectWithOAuthHandler(cfg ServerConfig, oauthHandler sdkauth.OAuthHandler
 	}
 	if err := conn.refreshCapabilities(); err != nil {
 		_ = session.Close()
+		forgetOwnedProcess(cfg, ownedCmd)
 		cancel()
 		setFailedServerStatus(serverName, transportName, fingerprint, cfg, oauthHandler != nil, err)
 		return fmt.Errorf("MCP server %s 能力发现失败: %w", serverName, err)
 	}
+	rememberOwnedProcess(cfg, ownedCmd)
 	sdkConnections.Lock()
 	sdkConnections.byName[serverName] = conn
 	sdkConnections.Unlock()
 	go monitorSDKConnection(conn)
 	return nil
+}
+
+func retryHawkEyeHTTPAfterStdioFail(ctx context.Context, client *sdkmcp.Client, stdioCfg ServerConfig, transportName string, oauthHandler sdkauth.OAuthHandler, stdioErr error) (*sdkmcp.ClientSession, ServerConfig, error) {
+	if stdioErr == nil || transportName != "stdio" || !isHawkEyeStdioConfig(stdioCfg) {
+		return nil, stdioCfg, stdioErr
+	}
+	port := hawkEyePortFromConfig(stdioCfg)
+	if !hawkEyePortOccupied(port) && !hawkEyeHTTPReady(hawkEyeMCPURL(stdioCfg)) {
+		return nil, stdioCfg, stdioErr
+	}
+	reused := hawkEyeStreamableHTTPConfig(stdioCfg)
+	if err := validateRemoteMCPURL(reused.URL); err != nil {
+		return nil, stdioCfg, stdioErr
+	}
+	session, err := client.Connect(ctx, &sdkmcp.StreamableClientTransport{
+		Endpoint:     reused.URL,
+		HTTPClient:   mcpHTTPClient(reused),
+		MaxRetries:   5,
+		OAuthHandler: oauthHandler,
+	}, nil)
+	if err != nil {
+		return nil, reused, fmt.Errorf("端口 %d 已占用，改连 Streamable HTTP %s 失败: %w", port, reused.URL, err)
+	}
+	return session, reused, nil
 }
 
 func openOAuthBrowser(target string) error {
@@ -534,8 +571,15 @@ func minMCPDuration(left, right time.Duration) time.Duration {
 }
 
 func applyHawkEyeCallDefaults(name string, args map[string]string) map[string]string {
-	copyArgs := make(map[string]string, len(args)+3)
+	if token := hawkEyeContinuationToken(args); token != "" {
+		// HawkEye 1.0.7 rejects numeric cursors and extra fields on continuation.
+		return map[string]string{"page_token": token}
+	}
+	copyArgs := make(map[string]string, len(args)+4)
 	for key, value := range args {
+		if strings.EqualFold(strings.ReplaceAll(strings.TrimSpace(key), "_", ""), "cursor") && strings.TrimSpace(value) != "" && strings.TrimSpace(value) != "0" {
+			continue
+		}
 		copyArgs[key] = value
 	}
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -549,7 +593,10 @@ func applyHawkEyeCallDefaults(name string, args map[string]string) map[string]st
 		if strings.TrimSpace(copyArgs["compact"]) == "" {
 			copyArgs["compact"] = "true"
 		}
-	case "browser_search", "browser_fetch":
+		if strings.TrimSpace(copyArgs["viewport_only"]) == "" {
+			copyArgs["viewport_only"] = "true"
+		}
+	case "browser_search", "browser_fetch", "browser_read_text", "browser_find":
 		if strings.TrimSpace(copyArgs["context_budget_chars"]) == "" {
 			copyArgs["context_budget_chars"] = "30000"
 		}
@@ -565,6 +612,10 @@ func applyHawkEyeCallDefaults(name string, args map[string]string) map[string]st
 		blob := strings.ToLower(copyArgs["text"] + " " + copyArgs["element"])
 		if strings.TrimSpace(copyArgs["clickMode"]) == "" && (strings.Contains(blob, "全屏") || strings.Contains(blob, "fullscreen")) {
 			copyArgs["clickMode"] = "trusted"
+		}
+	case "browser_captcha_assist":
+		if hawkEyeArg(copyArgs, "action") == "solve" && strings.TrimSpace(copyArgs["authorized"]) == "" {
+			copyArgs["authorized"] = "true"
 		}
 	}
 	return copyArgs
@@ -594,7 +645,7 @@ func compactHawkEyeMCPOutput(name, output string) string {
 	if limit == 0 || len(output) <= limit {
 		return output
 	}
-	return output[:limit] + fmt.Sprintf("\n\n[DeepSentry HawkEye 上下文优化：%s 结果共 %d 字符，已保留前 %d；请用 browser_find 定位目标，或 browser_snapshot 按 cursor 继续。不要对 artifact 执行本地 grep/read_file]\n", name, len(output), limit)
+	return output[:limit] + fmt.Sprintf("\n\n[DeepSentry HawkEye 上下文优化：%s 结果共 %d 字符，已保留前 %d；请用 browser_find 定位目标，或把 context.next_page_token 原样作为 page_token 单独继续。不要对 artifact 执行本地 grep/read_file]\n", name, len(output), limit)
 }
 
 func formatHawkEyeMCPContent(name string, contents []sdkmcp.Content, structured any, args map[string]string) string {
@@ -1102,6 +1153,8 @@ func closeSDKConnection(conn *sdkConnection) {
 	if conn.cancel != nil {
 		conn.cancel()
 	}
+	forgetOwnedProcess(conn.config, conn.ownedCmd)
+	conn.ownedCmd = nil
 	if conn.session != nil {
 		_ = conn.session.Close()
 	}

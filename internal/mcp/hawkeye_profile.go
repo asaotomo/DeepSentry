@@ -13,7 +13,7 @@ import (
 )
 
 // HawkEyeToolProfile is DeepSentry's local contract for the public HawkEye
-// MCP 1.0.6 tool surface. Server annotations remain useful evidence, but this
+// MCP 1.0.7 tool surface. Server annotations remain useful evidence, but this
 // allow-list is what permits action-aware routing and approvals; an arbitrary
 // third-party MCP server cannot become trusted merely by setting readOnlyHint.
 type HawkEyeToolProfile struct {
@@ -65,7 +65,7 @@ func hawkEyeOriginalName(tool *ExternalTool) string {
 }
 
 // HawkEyeKnownToolNames returns a stable copy for contract tests and operator
-// diagnostics. It intentionally lists every public 1.0.6 tool, not just the
+// diagnostics. It intentionally lists every public 1.0.7 tool, not just the
 // small subset most often used in prompts.
 func HawkEyeKnownToolNames() []string {
 	names := make([]string, 0, len(hawkEyeToolProfiles))
@@ -183,21 +183,31 @@ func hawkEyeDropsStructuredDump(name string) bool {
 func HawkEyeToolDescriptionOverlay(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "browser_click":
-		return "DeepSentry: 必须同时传 text=快照无障碍名称 和 ref。element 只是说明，不能当点击文本。B站倍速不要点菜单，用 hawkeye_evaluate 设 video.playbackRate。全屏优先 press_key key=f inputMode=trusted。清晰度下拉才用 browser_select_option。"
+		return "DeepSentry: 点最小可交互目标（内层 a/button，不要点包裹卡片）。必须同时传 text=无障碍名称 和 ref；element 只是说明。需要精确匹配时 exact=true。也可用 snapshot 的 stableId。B站倍速不要点菜单，用 hawkeye_evaluate 设 video.playbackRate。全屏优先 press_key key=f inputMode=trusted。清晰度下拉才用 browser_select_option。"
 	case "browser_press_key":
 		return "DeepSentry: 全屏按 key=f 且 inputMode=trusted（未传时会自动补 trusted）。先聚焦播放器。用 fullscreenElement 验证。不要用 JS dispatchEvent 伪装 userActivation。"
 	case "browser_select_option":
-		return "DeepSentry: 清晰度等下拉用这个工具，value 传可见项。B站倍速不要用它，主路径是 hawkeye_evaluate 设置 video.playbackRate=2。"
+		return "DeepSentry: 清晰度等下拉用这个工具，value 传可见项。B站倍速不要用它，主路径是 hawkeye_evaluate 设置 video.playbackRate=2。不要点装饰箭头后盲点。"
 	case "browser_navigate":
-		return "DeepSentry: 已知 URL 用 navigate，不要反复 tabs action=new。搜索页拿到 BV 链接后 navigate 到 https://www.bilibili.com/video/BV.../ ；合集第 N 集加 ?p=N。优先导航而不是点搜索卡片。"
+		return "DeepSentry: 已知 URL 用 navigate，不要反复 tabs action=new。内网/实验环境自签证书会自动绕过浏览器拦截页；公网证书告警不会自动继续，用 browser_security 诊断。搜索页拿到 BV 链接后 navigate 到 https://www.bilibili.com/video/BV.../ ；合集第 N 集加 ?p=N。"
 	case "browser_tabs":
 		return "DeepSentry: list 不绑定。整次任务最多 new 一次；已打开的页用 select。禁止用 tabs/new 代替 navigate。"
 	case "browser_snapshot":
-		return "DeepSentry: 先 snapshot 再交互。只看本轮返回的无障碍树，不要 read_file snapshot artifact。下一步用 diff=true 验证。精确点击从树里抄 text+ref。"
+		return "DeepSentry: 先 snapshot 再交互。默认视口内 compact 树。只看本轮无障碍树，不要 read_file artifact。下一步用 diff=true。翻页只传 page_token=context.next_page_token，不要带 cursor 或其他参数。"
 	case "browser_find":
-		return "DeepSentry: 大页面定位播放器/分P时优先 find，不要把 snapshot 落盘后再 grep。倍速仍用 evaluate 设 playbackRate。"
+		return "DeepSentry: 大页面定位优先 find，不要把 snapshot 落盘后再 grep。翻页同样只传 page_token。"
+	case "browser_search":
+		return "DeepSentry: 具体问题必须带搜索运算符，不要只丢关键词。用 \"精确短语\"、site:、filetype:、intitle:、年份范围 2020..2025、空格加 -排除。中文论坛可加 site:zhihu.com / tieba.baidu.com；CVE/威胁情报加 site:threatbook.cn 或 virustotal.com。首页嘈杂就改写运算符再搜。"
+	case "browser_research":
+		return "DeepSentry: 公开网页取证闭环。queries 同样要带搜索运算符。结果不够就换运算符/引擎，不要只翻第一页。"
+	case "browser_fetch":
+		return "DeepSentry: 隔离临时标签拉取公开页正文。默认会写入 HawkEye 抓包历史；只要正文可设 capture=false。私网地址会被拒绝。"
+	case "browser_security":
+		return "DeepSentry: 读当前页 TLS/证书结构化证据。不要用截图或正文推断证书是否可信。证据缺失时 refresh=true 做一次诊断刷新。"
+	case "browser_captcha_assist":
+		return "DeepSentry: 自有/登录图验证码必须走这个工具。先 action=analyze 看放大裁图，只认大号深色前景字，忽略彩线和浅色底纹。禁止 hawkeye_evaluate 像素、禁止下载 img src、禁止点击图片（会刷新）。再 action=solve authorized=true answer=识别结果。滑块用 suggestedOffsetRatio。reCAPTCHA/hCaptcha/Turnstile 等第三方挑战只报 manual_required，让用户手过。"
 	case "hawkeye_evaluate":
-		return "DeepSentry: B站播放主工具。读 paused/currentTime/playbackRate；倍速设 video.playbackRate；全屏后读 fullscreenElement；截图黑屏时 canvas.drawImage(video) 抓帧。全屏手势仍须先 press_key f。"
+		return "DeepSentry: 默认 MAIN 世界，能看见页面变量。B站播放：读 paused/currentTime/playbackRate；倍速设 video.playbackRate；全屏后读 fullscreenElement；黑屏时 canvas.drawImage(video)。全屏手势仍须先 press_key f。验证码、cookie、联网请求不要走 evaluate。"
 	default:
 		return ""
 	}
@@ -206,7 +216,7 @@ func HawkEyeToolDescriptionOverlay(name string) string {
 func hawkEyeInteractionHint(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "browser_snapshot", "browser_click", "browser_navigate", "browser_select_option", "browser_press_key", "browser_find", "hawkeye_evaluate":
-		return "[HawkEye] 精确点击: text=无障碍名 + ref。倍速: hawkeye_evaluate 设 video.playbackRate（不要点倍速菜单；清晰度才用 browser_select_option）。全屏: press_key key=f inputMode=trusted。黑屏截图用 canvas.drawImage。不要 read_file snapshot artifact，不要并行连点同一页。"
+		return "[HawkEye] 精确点击: text=无障碍名 + ref，点最小可交互节点。倍速: hawkeye_evaluate 设 video.playbackRate（不要点倍速菜单；清晰度才用 browser_select_option）。全屏: press_key key=f inputMode=trusted。黑屏截图用 canvas.drawImage。翻页只传 page_token。不要 read_file snapshot artifact，不要并行连点同一页。"
 	default:
 		return ""
 	}
@@ -231,6 +241,61 @@ func hawkEyeRawArg(args map[string]string, key string) string {
 	return ""
 }
 
+func hawkEyeOpaqueToken(raw string) string {
+	token := strings.TrimSpace(raw)
+	if token == "" || token == "0" || token == "<nil>" {
+		return ""
+	}
+	if _, err := strconv.Atoi(token); err == nil {
+		return ""
+	}
+	return token
+}
+
+func hawkEyeContinuationToken(args map[string]string) string {
+	if token := hawkEyeOpaqueToken(hawkEyeRawArg(args, "page_token")); token != "" {
+		return token
+	}
+	if token := hawkEyeOpaqueToken(hawkEyeRawArg(args, "next_page_token")); token != "" {
+		return token
+	}
+	if token := hawkEyeOpaqueToken(hawkEyeRawArg(args, "next_cursor")); token != "" {
+		return token
+	}
+	return hawkEyeOpaqueToken(hawkEyeRawArg(args, "cursor"))
+}
+
+func hawkEyeSafeEvaluate(code string) bool {
+	trimmed := strings.TrimSpace(code)
+	if trimmed == "" || len(trimmed) > 2500 {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	for _, blocked := range []string{
+		"fetch(", "xmlhttprequest", "websocket", "eval(", "new function",
+		"document.cookie", "localstorage", "sessionstorage", "innerhtml",
+		"document.write", "postmessage", "import(", "webkitmessagehandlers",
+	} {
+		if strings.Contains(lower, blocked) {
+			return false
+		}
+	}
+	if strings.Contains(lower, "requestfullscreen") {
+		return false
+	}
+	allowed := 0
+	for _, needle := range []string{
+		"playbackrate", "currenttime", "paused", "ended", "muted",
+		"fullscreenelement", "canvas", "drawimage", "todataurl", "toblob",
+		"queryselector", "video", "bpx-player",
+	} {
+		if strings.Contains(lower, needle) {
+			allowed++
+		}
+	}
+	return allowed >= 2
+}
+
 func hawkEyeStructuredSummary(name string, structured any) string {
 	if structured == nil || !hawkEyeDropsStructuredDump(name) {
 		return ""
@@ -245,14 +310,15 @@ func hawkEyeStructuredSummary(name string, structured any) string {
 	}
 	context, _ := payload["context"].(map[string]any)
 	complete := true
-	nextCursor := ""
+	nextPageToken := ""
 	if context != nil {
 		if value, ok := context["complete"].(bool); ok {
 			complete = value
 		}
-		if value, ok := context["next_cursor"]; ok && value != nil {
-			nextCursor = fmt.Sprint(value)
-		}
+		nextPageToken = firstNonEmptyMCP(
+			hawkEyeMapString(context, "next_page_token"),
+			hawkEyeOpaqueToken(hawkEyeMapString(context, "next_cursor")),
+		)
 	}
 	url := firstNonEmptyMCP(hawkEyeMapString(payload, "url"), nestedHawkEyeString(payload, "tab", "url"))
 	title := firstNonEmptyMCP(hawkEyeMapString(payload, "title"), nestedHawkEyeString(payload, "tab", "title"))
@@ -268,8 +334,8 @@ func hawkEyeStructuredSummary(name string, structured any) string {
 		fmt.Fprintf(&b, " ok=%v", ok)
 	}
 	fmt.Fprintf(&b, " complete=%v", complete)
-	if !complete && nextCursor != "" && nextCursor != "<nil>" {
-		fmt.Fprintf(&b, " next_cursor=%s", nextCursor)
+	if !complete && nextPageToken != "" && nextPageToken != "<nil>" {
+		fmt.Fprintf(&b, " next_page_token=%s （翻页只传 page_token，不要带 cursor 或其他参数）", nextPageToken)
 	}
 	if count, ok := payload["element_count"]; ok {
 		fmt.Fprintf(&b, " element_count=%v", count)
@@ -427,6 +493,9 @@ func HawkEyeToolRisk(tool *ExternalTool, args map[string]string) (risk, reason s
 	case "hawkeye_fuzz_run":
 		return MCPRiskHigh, "HawkEye fuzz_run 会对授权目标批量发送变体", true
 	case "hawkeye_evaluate":
+		if hawkEyeSafeEvaluate(hawkEyeRawArg(args, "code")) {
+			return MCPRiskLow, "HawkEye evaluate 仅做播放状态/倍速/抓帧校验，不单独弹确认", true
+		}
 		return MCPRiskHigh, "HawkEye evaluate 会在页面主世界执行任意 JavaScript", true
 	case "hawkeye_script_run", "hawkeye_script_upsert":
 		return MCPRiskHigh, "HawkEye 脚本工具会保存或执行页面注入脚本", true
@@ -472,15 +541,22 @@ func preferExistingHawkEyeHTTP(cfg ServerConfig) (ServerConfig, bool) {
 	if port <= 0 {
 		return cfg, false
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
-	if !hawkEyeHTTPReady(url) {
+	if !hawkEyeHTTPReady(hawkEyeMCPURL(cfg)) && !hawkEyePortOccupied(port) {
 		return cfg, false
 	}
+	return hawkEyeStreamableHTTPConfig(cfg), true
+}
+
+func hawkEyeStreamableHTTPConfig(cfg ServerConfig) ServerConfig {
 	cfg.Type = "streamable_http"
-	cfg.URL = url
+	cfg.URL = hawkEyeMCPURL(cfg)
 	cfg.Command = ""
 	cfg.Args = nil
-	return cfg, true
+	return cfg
+}
+
+func hawkEyeMCPURL(cfg ServerConfig) string {
+	return fmt.Sprintf("http://127.0.0.1:%d/mcp", hawkEyePortFromConfig(cfg))
 }
 
 func isHawkEyeStdioConfig(cfg ServerConfig) bool {
@@ -529,37 +605,67 @@ func hawkEyePortFromRaw(raw string) int {
 	return port
 }
 
-func hawkEyeHTTPReady(url string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func hawkEyePortOccupied(port int) bool {
+	if port < 1024 || port > 65535 {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 300*time.Millisecond)
 	if err != nil {
 		return false
 	}
-	req.Header.Set("Accept", "text/event-stream")
+	_ = conn.Close()
+	return true
+}
+
+func hawkEyeHTTPReady(rawURL string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Accept", "text/event-stream, application/json")
+	req.Close = true
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		host, err := hawkEyeHostPort(url)
-		if err != nil {
-			return false
-		}
-		conn, dialErr := net.DialTimeout("tcp", host, 300*time.Millisecond)
-		if dialErr != nil {
-			return false
-		}
-		_ = conn.Close()
-		return true
+		return hawkEyePortOccupiedFromURL(rawURL)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
+	if hawkEyeHTTPIndicatesMCP(resp) {
+		return true
+	}
+	return hawkEyePortOccupiedFromURL(rawURL)
+}
+
+func hawkEyeHTTPIndicatesMCP(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
 		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "event-stream") {
 			return true
 		}
 		buf := make([]byte, 128)
 		n, _ := resp.Body.Read(buf)
-		return strings.Contains(string(buf[:n]), "HawkEye")
+		return strings.Contains(string(buf[:n]), "HawkEye") || strings.Contains(strings.ToLower(string(buf[:n])), "mcp")
+	case http.StatusNoContent, http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotAcceptable:
+		return true
 	}
-	return resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNoContent
+	return strings.Contains(strings.ToUpper(resp.Header.Get("Allow")), "POST")
+}
+
+func hawkEyePortOccupiedFromURL(rawURL string) bool {
+	host, err := hawkEyeHostPort(rawURL)
+	if err != nil {
+		return false
+	}
+	conn, dialErr := net.DialTimeout("tcp", host, 300*time.Millisecond)
+	if dialErr != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func hawkEyeHostPort(rawURL string) (string, error) {

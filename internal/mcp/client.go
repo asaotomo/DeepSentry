@@ -320,21 +320,22 @@ func isHawkEyeExternalTool(tool *ExternalTool) bool {
 }
 
 func hawkEyeWorkflowPrompt() string {
-	return `【HawkEye MCP 1.0.6 深度适配工作流】
-HawkEye 已出现在本会话工具列表中，就等于已经连通。禁止再用 execute/ls/md5/lsof/config_manage 做安装、端口或文件自检；直接完成用户任务。
+	return `【HawkEye MCP 1.0.7 深度适配工作流】
+HawkEye 已出现在本会话工具列表中，就等于已经连通。禁止再用 execute/ls/md5/lsof/config_manage 做安装、端口或文件自检；直接完成用户任务。扩展弹窗需打开 “HawkEye Browser Automation MCP”，VIP/Pro 才能桥接。
 覆盖：本会话禁止用内置 browser_browse/browser_interact 打开、播放或全屏网页。真实浏览器一律走 HawkEye。
 - B站/哔哩哔哩/播放/倍速/全屏：第一步必须 load_skill("bilibili-play")，然后严格按该 skill 执行。合集第 N 集用 https://www.bilibili.com/video/BV...?p=N，不要靠连点播放器碰运气。
-- 打开页面：已知 URL 用 browser_navigate。搜索结果里出现 BV/番剧链接后，再 navigate 到完整 https URL（优先导航，不要点搜索卡片）。整次任务最多 browser_tabs action=new 一次；list 不绑定，已打开的页用 select。
-- 交互顺序：snapshot（看本轮无障碍树，禁止 read_file artifact）→ 高层工具 → snapshot(diff=true) 验证。精确点击必须同时传 text=无障碍名称 和 ref；element 只是说明。清晰度等下拉才用 browser_select_option，value 传可见项（如 1080P）；不要点装饰箭头后满页盲点。
+- 打开页面：已知 URL 用 browser_navigate。内网/实验环境自签证书会自动绕过拦截页，公网证书告警用 browser_security 诊断。搜索结果里出现 BV/番剧链接后，再 navigate 到完整 https URL。整次任务最多 browser_tabs action=new 一次；list 不绑定，已打开的页用 select。
+- 交互顺序：snapshot（默认视口 compact 树，禁止 read_file artifact）→ 高层工具 → snapshot(diff=true)。精确点击必须同时传 text=无障碍名称 和 ref，点最小可交互节点；element 只是说明。可用 stableId。清晰度等下拉才用 browser_select_option，value 传可见项（如 1080P）；不要点装饰箭头后满页盲点。
 - 播放/倍速/全屏（对标成功会话）：hawkeye_evaluate 读 video 的 paused/currentTime/playbackRate。倍速主路径是一次 evaluate 设置 video.playbackRate=2，不要点「倍速」菜单。全屏主路径是聚焦播放器后 browser_press_key key=f inputMode=trusted；用 document.fullscreenElement 验证（B站常见 bpx-player-container）。trusted 失败时不得用 JS dispatchEvent 伪装成功，也不得连点「全屏」按钮。
 - 黑屏截图不是没在播：B站全屏走 GPU 层，browser_screenshot 常黑。currentTime 递增才算在播。需要画面时用 hawkeye_evaluate 对 video 做 canvas.drawImage，不要反复截图。
 - 真实用户手势：clickMode=trusted / inputMode=trusted。Chrome 走 CDP trusted input，Firefox 走 native-input relay。
-- 大页面：优先 browser_find/read_text；complete=false 时传 next_cursor。不要对 HawkEye snapshot artifact 做 execute/grep。
-- 抓包：capture_state/start → 触发请求 → history → inspect/request_get。GET 无 body 不是漏抓。
+- 大页面：优先 browser_find/read_text。complete=false 时把 context.next_page_token 原样作为 page_token 单独再调同一工具；禁止传数字 cursor，禁止带着 url/query/max_elements 一起翻页。2 分钟内有效。不要对 HawkEye snapshot artifact 做 execute/grep。
+- 公开检索：browser_search/research 必须用搜索运算符（"精确短语"、site:、filetype:、intitle:、-排除、2020..2025），不要只丢关键词。首页嘈杂就改写再搜。
+- 抓包：capture_state/start → 触发请求 → history → inspect/request_get。GET 无 body 不是漏抓。browser_fetch 默认也会写入抓包历史。
 - 主动验证：先 scope get，仅授权 host 上 mutate → replay/compare；fuzz 需 fuzzingEnabled。
 - 拦截必须收尾：enable → queue → release/drop → disable。
-- 验证码：captcha_assist 先 analyze；第三方挑战请用户手动完成。
-- 不要并行修改同一标签、抓包或拦截状态。evaluate 用于校验播放状态、设 playbackRate、canvas 抓帧；不能代替 trusted 全屏手势。
+- 验证码：captcha_assist 先 analyze 看放大图，只认大号深色字；禁止 evaluate/下载/点击验证码图。solve 带 authorized=true。第三方反机器人挑战请用户手动完成。
+- 不要并行修改同一标签、抓包或拦截状态。evaluate 用于校验播放状态、设 playbackRate、canvas 抓帧；不能代替 trusted 全屏手势，也不能用来解验证码。
 
 `
 }
@@ -654,7 +655,8 @@ func monitorStdioConnection(conn *stdioConnection, cmd *exec.Cmd) {
 	}
 }
 
-// CloseAll stops every stdio MCP child process. It is safe to call repeatedly.
+// CloseAll stops every MCP session and any stdio child this process started.
+// It is safe to call repeatedly.
 func CloseAll() {
 	closeSDKConnections()
 	stdioConnections.Lock()

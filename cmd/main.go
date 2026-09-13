@@ -20,11 +20,13 @@ import (
 
 	"ai-edr/internal/analyzer"
 	"ai-edr/internal/builtin"
+	"ai-edr/internal/chat"
 	"ai-edr/internal/collector"
 	"ai-edr/internal/config"
 	"ai-edr/internal/executor"
 	"ai-edr/internal/harness"
 	"ai-edr/internal/harness/subagent"
+	"ai-edr/internal/inspection"
 	"ai-edr/internal/logger"
 	"ai-edr/internal/mcp"
 	"ai-edr/internal/scheduler"
@@ -44,7 +46,7 @@ func main() {
 func runCLI() (exitCode int) {
 	// 1. 跨平台控制台初始化
 	enableWindowsANSI()
-	defer boundedCleanup("MCP", 2*time.Second, mcp.CloseAll)
+	defer boundedCleanup("MCP", 3*time.Second, mcp.CloseAll)
 	defer boundedCleanup("浏览器会话", 2*time.Second, builtin.CloseBrowserSessions)
 
 	// 🟢 [核心增强] 强制设置 Windows 控制台代码页为 UTF-8
@@ -59,6 +61,7 @@ func runCLI() (exitCode int) {
 	autoYes := flag.Bool("y", false, "跳过 batch 模式确认")
 	reconf := flag.Bool("init", false, "强制重新配置")
 	resumeSession := flag.String("resume", "", "恢复 checkpoint 会话 ID")
+	sessionFlag := flag.String("session", "", "绑定会话 ID（存在则恢复并追加任务，不存在则新建）")
 	listSessions := flag.Bool("list-sessions", false, "列出可恢复的会话")
 	pickSession := flag.Bool("pick-session", false, "TUI 选择 checkpoint 会话")
 	tuiMode := flag.Bool("tui", true, "启用全屏 TUI 界面（默认）")
@@ -67,14 +70,21 @@ func runCLI() (exitCode int) {
 	taskShort := flag.String("q", "", "任务描述（--task 简写）")
 	planMode := flag.Bool("plan", false, "计划模式：必要时先追问，再生成 todo 计划并执行")
 	competitionMode := flag.Bool("competition", false, "比赛模式：按 10 分钟限时、证据闭环和评分规范优化执行/输出")
-	subAgentMaxStepsFlag := flag.Int("subagent-max-steps", 0, "子 Agent 最大步数上限（默认读取 config.yaml: subagent_max_steps，未配置为 15）")
+	subAgentMaxStepsFlag := flag.Int("subagent-max-steps", 0, "子 Agent 初始步数窗口；关闭自适应时为上限（默认读取 subagent_max_steps，未配置为 15）")
 	httpProxyFlag := flag.String("proxy", "", "控制端 HTTP/HTTPS 代理，例如 http://127.0.0.1:8080")
 	socks5ProxyFlag := flag.String("socks5", "", "控制端 SOCKS5 代理，例如 socks5://127.0.0.1:1080")
 	jsonOutput := flag.Bool("json", false, "经典模式输出 JSONL 事件")
 	quiet := flag.Bool("quiet", false, "经典模式仅输出关键结果和错误")
+	replyFinal := flag.Bool("reply-final", false, "仅输出最终任务结论（聊天机器人回复）")
 	webshellMode := flag.Bool("webshell", false, "WebShell/非 TTY 友好模式（提交后台执行，立即返回报告/进度路径）")
 	noColor := flag.Bool("no-color", false, "禁用彩色输出（也可设置 NO_COLOR=1 或 DEEPSENTRY_NO_COLOR=1）")
 	themeFlag := flag.String("theme", "", "TUI 主题 auto|dark|light（默认自动适应终端背景）")
+	chatMode := flag.Bool("chat", false, "运行聊天机器人控制服务")
+	inspectRun := flag.Bool("inspect", false, "执行配置的多设备巡检并生成 Word/Markdown")
+	inspectSelector := flag.String("inspect-selector", "all", "巡检设备名称或标签")
+	chatSetupCLI := flag.Bool("chat-setup-cli", false, "纯终端机器人连接向导（SSH/CMD）")
+	chatSetup := flag.Bool("chat-setup", false, "打开通讯工具连接窗口（飞书/QQ/微信/企微扫码，钉钉手动配置）")
+	chatStop := flag.Bool("chat-stop", false, "停止仍在运行的聊天服务")
 	schedulerMode := flag.Bool("scheduler", false, "仅运行本地定时任务调度器")
 	showVersion := flag.Bool("version", false, "显示版本")
 	showHelp := flag.Bool("h", false, "显示帮助")
@@ -101,7 +111,11 @@ func runCLI() (exitCode int) {
 		*batchMode = true
 		*autoYes = true
 	}
-	if *schedulerMode {
+	if *replyFinal {
+		*noTUI = true
+		*quiet = true
+	}
+	if *inspectRun || *schedulerMode || *chatMode || *chatSetup || *chatSetupCLI || *chatStop {
 		*noTUI = true
 		*quiet = true
 	}
@@ -109,7 +123,7 @@ func runCLI() (exitCode int) {
 		*tuiMode = false
 	}
 	interactiveTerminal := isInteractiveTerminal()
-	explicitOneShot := strings.TrimSpace(*taskFlag) != "" || strings.TrimSpace(*taskShort) != "" || len(flag.Args()) > 0 || strings.TrimSpace(*resumeSession) != ""
+	explicitOneShot := strings.TrimSpace(*taskFlag) != "" || strings.TrimSpace(*taskShort) != "" || len(flag.Args()) > 0 || strings.TrimSpace(*resumeSession) != "" || strings.TrimSpace(*sessionFlag) != ""
 	// --no-tui with an explicit task is primarily a one-shot automation mode.
 	// WebShell/SFTP clients often allocate a pseudo-TTY, but that must not make
 	// ask_user or high-risk confirmations wait forever on stdin.
@@ -232,9 +246,78 @@ func runCLI() (exitCode int) {
 		config.GlobalConfig.ControllerProxy = startupProxy
 	}
 
+	if *inspectRun {
+		if *chatMode || *chatSetup || *chatSetupCLI || *chatStop || *schedulerMode || explicitOneShot {
+			fmt.Println("--inspect 不能与其他运行模式同用")
+			return 1
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		report, err := inspection.Run(ctx, config.GlobalConfig, *inspectSelector)
+		if report.Markdown != "" {
+			fmt.Printf("Markdown: %s\nWord: %s\n证据清单: %s\n", report.Markdown, report.Word, report.Manifest)
+		}
+		if err != nil {
+			fmt.Println(err)
+			return 1
+		}
+		return 0
+	}
+	if *chatMode || *chatSetup || *chatSetupCLI || *chatStop {
+		if *schedulerMode || explicitOneShot || *webshellMode || *reconf {
+			fmt.Println("--chat/--chat-setup/--chat-stop 不能与任务执行、--scheduler、--webshell 或 --init 同用")
+			return 1
+		}
+		if *chatStop {
+			if err := chat.StopDetachedChat(config.GlobalConfig.Chat); err != nil {
+				fmt.Printf("停止后台聊天服务失败: %v\n", err)
+				return 1
+			}
+			fmt.Println("后台聊天服务已停止。")
+			return 0
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Println(err)
+			return 1
+		}
+		cfgPath, err := filepath.Abs(viper.ConfigFileUsed())
+		if err != nil {
+			fmt.Println(err)
+			return 1
+		}
+		runner := chat.ProcessRunner(exe, cfgPath, startupProxy)
+		if *chatSetupCLI {
+			err = chat.SetupCLI(ctx, config.GlobalConfig.Chat, runner, os.Stdin, os.Stdout)
+		} else if *chatSetup {
+			err = chat.Setup(ctx, config.GlobalConfig.Chat, runner)
+		} else {
+			var service *chat.Service
+			service, err = chat.New(ctx, config.GlobalConfig.Chat, runner)
+			if err == nil {
+				err = service.Serve()
+			}
+		}
+		if err != nil {
+			fmt.Printf("聊天服务启动失败: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	// 4. 获取用户需求 / 恢复会话
 	var history []analyzer.Message
 	sessionID := *resumeSession
+	boundSession := strings.TrimSpace(*sessionFlag)
+	if boundSession != "" {
+		if strings.TrimSpace(sessionID) != "" && sessionID != boundSession {
+			fmt.Println("--resume 与 --session 不能指向不同会话")
+			return 1
+		}
+		sessionID = boundSession
+	}
 	awaitGoal := false
 	resumeSupplement := resumeUserSupplement(*taskFlag, *taskShort, flag.Args())
 
@@ -253,23 +336,49 @@ func runCLI() (exitCode int) {
 	if sessionID != "" {
 		cp, err := harness.LoadCheckpoint(sessionID)
 		if err != nil {
-			fmt.Printf("%s恢复会话失败: %v\n", ui.Prefix("❌", "[ERR]"), err)
-			ui.Exit(1)
-		}
-		history = cp.History
-		if len(history) == 0 {
-			history = []analyzer.Message{{Role: "user", Content: "继续之前的任务"}}
-		}
-		if strings.TrimSpace(resumeSupplement) != "" {
-			history = append(history, analyzer.Message{
-				Role:    "user",
-				Content: "用户补充：" + strings.TrimSpace(resumeSupplement),
-			})
-		}
-		if !*tuiMode {
-			fmt.Printf("%s已恢复会话 %s (step %d)\n", ui.Prefix("♻️", "[RESUME]"), sessionID, cp.StepNum)
+			if boundSession == "" || strings.TrimSpace(*resumeSession) != "" {
+				fmt.Printf("%s恢复会话失败: %v\n", ui.Prefix("❌", "[ERR]"), err)
+				ui.Exit(1)
+			}
+			// --session with no checkpoint yet: create a fresh session under this ID.
+			userGoal := strings.TrimSpace(resumeSupplement)
+			if userGoal == "" {
+				if *tuiMode {
+					awaitGoal = true
+				} else if nonInteractive {
+					if *jsonOutput {
+						printJSON(map[string]any{
+							"error":   "missing_task",
+							"message": "新建 --session 需要 --task/-q 或任务描述参数。",
+						})
+					} else {
+						fmt.Println(ui.Prefix("❌", "[ERR]") + "新建 --session 需要任务描述。")
+					}
+					ui.Exit(1)
+				}
+			} else {
+				history = []analyzer.Message{{Role: "user", Content: userGoal}}
+			}
+		} else {
+			history = cp.History
+			if len(history) == 0 {
+				history = []analyzer.Message{{Role: "user", Content: "继续之前的任务"}}
+			}
 			if strings.TrimSpace(resumeSupplement) != "" {
-				fmt.Println(ui.Prefix("💡", "[TIP]") + "已追加本次 --task/参数作为用户补充并继续执行")
+				content := strings.TrimSpace(resumeSupplement)
+				if !*replyFinal {
+					content = "用户补充：" + content
+				}
+				history = append(history, analyzer.Message{
+					Role:    "user",
+					Content: content,
+				})
+			}
+			if !*tuiMode && !*quiet {
+				fmt.Printf("%s已恢复会话 %s (step %d)\n", ui.Prefix("♻️", "[RESUME]"), sessionID, cp.StepNum)
+				if strings.TrimSpace(resumeSupplement) != "" {
+					fmt.Println(ui.Prefix("💡", "[TIP]") + "已追加本次 --task/参数作为用户补充并继续执行")
+				}
 			}
 		}
 	} else {
@@ -603,6 +712,7 @@ func runCLI() (exitCode int) {
 		inventory := mcp.ConnectedInventory()
 		startup.MCPCount = len(inventory)
 		startup.MCPSummary = mcp.FormatConnectedInventory()
+		startup.ChatSummary = chat.StartupSummary(config.GlobalConfig.Chat)
 	}
 
 	if sessionID != "" {
@@ -625,14 +735,51 @@ func runCLI() (exitCode int) {
 
 	var confirmationMu sync.Mutex
 	sessionApprovals := make(map[string]string)
+	allowAllChatSession := false
 	confirmFn := func(action *harness.AgentAction) bool {
 		confirmationMu.Lock()
 		defer confirmationMu.Unlock()
+		if dir := strings.TrimSpace(os.Getenv("DEEPSENTRY_CHAT_CONFIRM_DIR")); dir != "" {
+			scopeKey, scopeLabel := action.ApprovalScopeKey, action.ApprovalScopeLabel
+			if scopeKey == "" {
+				scopeKey, scopeLabel = harness.SessionApprovalScope(action)
+			}
+			if allowAllChatSession {
+				return true
+			}
+			if _, ok := sessionApprovals[scopeKey]; ok && scopeKey != "" {
+				return true
+			}
+			summary := fmt.Sprintf("%s %s", action.Type, action.ToolName)
+			if strings.TrimSpace(action.ToolName) == "" {
+				summary = string(action.Type)
+			}
+			_ = chat.WriteConfirmRequest(dir, chat.ConfirmRequest{
+				Summary:    strings.TrimSpace(summary),
+				Reason:     strings.TrimSpace(action.Reason),
+				ScopeKey:   scopeKey,
+				ScopeLabel: scopeLabel,
+			})
+			reply, ok := chat.WaitConfirmReply(dir, nil, 10*time.Minute)
+			if !ok || reply.Decision == "deny" {
+				return false
+			}
+			if reply.Decision == "allow_all_session" {
+				allowAllChatSession = true
+			}
+			if reply.Decision == "allow_session" && scopeKey != "" {
+				sessionApprovals[scopeKey] = scopeLabel
+			}
+			return true
+		}
 		if nonInteractive {
 			// A one-shot process has no reliable confirmation channel.  Batch -y
 			// bypasses this callback; all other high-risk actions fail closed.
 			fmt.Fprintln(os.Stderr, ui.Prefix("🚫", "[DENY]")+"非交互任务已拒绝需要人工确认的操作；如已授权无人值守执行，请显式使用 --batch -y。")
 			return false
+		}
+		if allowAllChatSession {
+			return true
 		}
 		scopeKey, scopeLabel := action.ApprovalScopeKey, action.ApprovalScopeLabel
 		if scopeKey == "" {
@@ -652,11 +799,14 @@ func runCLI() (exitCode int) {
 		choice := "拒绝"
 		_ = askOne(&survey.Select{
 			Message: message,
-			Options: []string{"仅允许本次", "本会话允许同类操作", "拒绝"},
+			Options: []string{"仅允许本次", "本会话允许同类操作", "本次会话允许所有高危操作", "拒绝"},
 			Default: "拒绝",
 			Help:    "会话授权使用保守指纹；文件修改仅匹配同一动作和同一文件。新会话自动失效。",
 		}, &choice)
 		ui.ResetTerminalState()
+		if choice == "本次会话允许所有高危操作" {
+			allowAllChatSession = true
+		}
 		if choice == "本会话允许同类操作" && scopeKey != "" {
 			sessionApprovals[scopeKey] = scopeLabel
 		}
@@ -673,6 +823,8 @@ func runCLI() (exitCode int) {
 		PauseOnAskUser:   false,
 		MaxSteps:         maxSteps,
 		SubAgentMaxSteps: subAgentMaxSteps,
+		MultiTurn:        *replyFinal,
+		ChatReply:        *replyFinal,
 		PlanMode:         *planMode,
 		CompetitionMode:  *competitionMode,
 		ConfirmFn:        confirmFn,
@@ -740,8 +892,36 @@ func runCLI() (exitCode int) {
 	}
 	if *webshellMode {
 		outSink = harness.NewWebShellSink(outSink)
+	} else if *replyFinal {
+		outSink = harness.NewFinalReplySink()
 	} else if *quiet {
 		outSink = harness.NewQuietSink(outSink)
+	}
+	if dir := strings.TrimSpace(os.Getenv("DEEPSENTRY_CHAT_CONFIRM_DIR")); *replyFinal && dir != "" {
+		images, imageErr := chat.LoadControlImages(dir)
+		if imageErr != nil {
+			fmt.Fprintln(os.Stderr, "聊天图片清单读取失败")
+			return 2
+		}
+		chat.ApplyControlImages(&history, images, *taskFlag)
+		if len(history) > 0 && history[len(history)-1].Role == "user" {
+			history[len(history)-1].Content += chat.FileInstructions()
+		}
+		outSink = &chat.ControlSink{Base: outSink, Dir: dir}
+		loopCfg.DrainInput = func() []analyzer.Message { return chat.DrainControlInput(dir) }
+		loopCfg.AwaitUserFn = func(action *harness.AgentAction) (string, bool) {
+			confirmationMu.Lock()
+			defer confirmationMu.Unlock()
+			question := action.Question
+			for i, option := range action.Options {
+				question += fmt.Sprintf("\n%d. %s", i+1, option)
+			}
+			if err := chat.WriteConfirmRequest(dir, chat.ConfirmRequest{Kind: "input", Summary: question}); err != nil {
+				return "", false
+			}
+			reply, ok := chat.WaitConfirmReply(dir, loopCfg.Stop, 10*time.Minute)
+			return reply.Text, ok && reply.Decision == "user_input"
+		}
 	}
 	loopCfg.UI = outSink
 	runCtx, stopRunSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1831,61 +2011,53 @@ func validateCustomContextWindow(value interface{}) error {
 	return nil
 }
 
-var wizardProviderOptions = []string{
-	"DeepSeek（推荐 · deepseek-v4-flash-vision-exp · 多模态）",
-	"Qwen / 阿里百炼 (qwen3.7-plus)",
-	"百度千帆 Coding Plan (qianfan-code-latest)",
-	"火山方舟 Coding Plan (ark-code-latest)",
-	"中国电信星辰 TeleAI (GLM-5-Pro)",
-	"腾讯混元 Hunyuan / TokenHub (hy4-preview)",
-	"OpenAI (gpt-5.6)",
-	"Anthropic Claude (claude-opus-5)",
-	"Google Gemini (gemini-3.8-flash)",
-	"MiniMax (MiniMax-M3 · 多模态)",
-	"智谱 GLM (glm-5.3-flash · 多模态)",
-	"Xiaomi MiMo Token Plan / MiMo Claw (mimo-v2.5 · 多模态)",
-	"xAI Grok (grok-4.6)",
-	"Ollama (本地运行)",
-	"LM Studio (本地运行)",
-	"其他 (自定义/中转)",
+var wizardProviderOrder = []string{"deepseek", "qwen", "qianfan", "volcengine", "teleai", "hunyuan", "openai", "anthropic", "google", "minimax", "glm", "mimo", "xai", "ollama", "lmstudio"}
+
+func wizardProviderLabel(id string) string {
+	p, ok := config.FindProvider(id)
+	if !ok {
+		return "其他 (自定义/中转)"
+	}
+	detail := p.Model
+	if model, ok := config.FindModelPreset(id, p.Model); ok && model.SupportsVision {
+		detail += " · 图片理解"
+	}
+	if id == "deepseek" {
+		detail += " · 推荐"
+	}
+	if id == "ollama" || id == "lmstudio" {
+		detail = "选择本机已加载模型"
+	}
+	return p.DisplayName + " (" + detail + ")"
 }
 
-const wizardRecommendedProvider = "DeepSeek（推荐 · deepseek-v4-flash-vision-exp · 多模态）"
+var wizardProviderOptions = func() []string {
+	var labels []string
+	for _, id := range wizardProviderOrder {
+		labels = append(labels, wizardProviderLabel(id))
+	}
+	return append(labels, "其他 (自定义/中转)")
+}()
+var wizardRecommendedProvider = wizardProviderLabel("deepseek")
 
-func wizardProviderID(providerLabel string) string {
-	switch {
-	case strings.Contains(providerLabel, "DeepSeek"):
-		return "deepseek"
-	case strings.Contains(providerLabel, "Qwen"):
-		return "qwen"
-	case strings.Contains(providerLabel, "千帆"):
-		return "qianfan"
-	case strings.Contains(providerLabel, "火山") || strings.Contains(providerLabel, "方舟"):
-		return "volcengine"
-	case strings.Contains(providerLabel, "星辰") || strings.Contains(providerLabel, "TeleAI"):
-		return "teleai"
-	case strings.Contains(providerLabel, "混元") || strings.Contains(providerLabel, "Hunyuan"):
-		return "hunyuan"
-	case strings.Contains(providerLabel, "OpenAI"):
-		return "openai"
-	case strings.Contains(providerLabel, "Anthropic"):
-		return "anthropic"
-	case strings.Contains(providerLabel, "Gemini"):
-		return "google"
-	case strings.Contains(providerLabel, "MiniMax"):
-		return "minimax"
-	case strings.Contains(providerLabel, "GLM"):
-		return "glm"
-	case strings.Contains(providerLabel, "MiMo"):
-		return "mimo"
-	case strings.Contains(providerLabel, "Grok"):
-		return "xai"
-	case strings.Contains(providerLabel, "Ollama"):
-		return "ollama"
-	case strings.Contains(providerLabel, "LM Studio"):
-		return "lmstudio"
-	default:
-		return "custom"
+func wizardProviderID(label string) string {
+	for _, id := range wizardProviderOrder {
+		if wizardProviderLabel(id) == label {
+			return id
+		}
+	}
+	return "custom"
+}
+
+func wizardModelSuggestions(provider string) func(string) []string {
+	return func(query string) []string {
+		var ids []string
+		for _, id := range config.ProviderModelSuggestions(provider) {
+			if strings.Contains(strings.ToLower(id), strings.ToLower(strings.TrimSpace(query))) {
+				ids = append(ids, id)
+			}
+		}
+		return ids
 	}
 }
 
@@ -1953,15 +2125,15 @@ func runElegantWizard() error {
 
 	switch providerID {
 	case "deepseek":
-		urlHelp = "DeepSeek 官方 OpenAI 兼容 Base URL；推荐模型支持图片与 MCP 截图回灌"
+		urlHelp = "DeepSeek 官方 OpenAI 兼容 Base URL；默认 deepseek-flash（产品名 V4.1 Flash）原生多模态，可接收图片与 MCP 截图回灌"
 	case "openai":
-		urlHelp = "OpenAI 官方 Base URL；默认 gpt-5.6（旗舰 alias）。官方推荐 Responses 时可把协议改成 openai_responses"
+		urlHelp = "OpenAI 官方 Base URL；默认 gpt-6-astra + Responses API。可手动指定其他模型及兼容协议"
 	case "anthropic":
-		urlHelp = "Anthropic 官方 Messages API Base URL；默认 claude-opus-5，长程 Agent 也可改 claude-fable-5-1"
+		urlHelp = "Anthropic 官方 Messages API Base URL；默认 claude-fable-5-1；可选 claude-opus-5 或 claude-sonnet-5"
 	case "google":
 		urlHelp = "Gemini 官方 OpenAI 兼容 Base URL；默认 gemini-3.8-flash"
 	case "qwen":
-		urlHelp = "阿里云百炼 OpenAI 兼容 Base URL；默认 qwen3.7-plus，最强推理可改 qwen3.8-max"
+		urlHelp = "阿里云百炼 OpenAI 兼容 Base URL；默认 qwen3.8-max，更快可选 qwen3.8-flash"
 	case "hunyuan":
 		urlHelp = "腾讯云 TokenHub OpenAI 兼容 Base URL；hunyuan-turbos-latest 已下线，默认 hy4-preview"
 	case "minimax":
@@ -2013,7 +2185,8 @@ func runElegantWizard() error {
 			Prompt: &survey.Input{
 				Message: ui.Prefix("🧠", "[MODEL]") + "模型名称 (Model ID):",
 				Default: defaultModel,
-				Help:    "例如: deepseek-v4-flash-vision-exp、gpt-5.6、claude-opus-5、gemini-3.8-flash、qwen3.7-plus、hy4-preview；精确 ID 会自动识别上下文和视觉能力",
+				Suggest: wizardModelSuggestions(providerID),
+				Help:    "按 Tab 查看本提供商模型；也可直接输入控制台允许的 Model ID。本地服务请填写已加载模型名称",
 			},
 			Validate: survey.Required,
 		},

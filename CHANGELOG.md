@@ -5,9 +5,62 @@
 版本日期以 GitHub Release 的首次发布时间为准。项目当前使用带有
 `Ultimate` 后缀的 Release 标签，因此下文保留对应的正式版本名称。
 
-## [未发布]
+## [2.0.4 Ultimate] - 2026-09-13
 
-暂无已记录的未发布变更。
+### 网页巡检与 Word 报告
+
+- 新增 `inspection_run`：设备清单、HawkEye 交互巡检、固定采集与证据报告编译；输出 Word / Markdown 与真实截图。
+- 说「生成报告」即可从当前/最新会话编译 Word，不必手写 JSON 或安装 pandoc。
+- Word 采用整页封面、结论 → 详情 → 建议的章节顺序，截图插在对应章节；Markdown 增加概览和异常清单。
+- 允许只读会话审计报告、`mcp-artifacts` 截图和巡检产物；`reports/chat` 等密钥路径仍禁止读取，整份 `reports/` 仍禁止写入。
+
+### 聊天可靠性
+
+- 聊天 MCP 初始化失败从最终答案中分离，同一会话只独立提示一次；诊断保留到任务目录 diagnostics.log，必需工具失败仍正常报错。
+
+### 启动面板与确认选项
+
+- 启动面板增加「聊天」一行，显示已启用的微信、QQ、企业微信、飞书等机器人；后台进程在跑时标注运行中。
+- 终端确认框补回「本次会话允许所有高危操作」（按 S）；`/new` 或切换会话后失效。
+
+### 模型目录
+
+- 模型目录按 2026-09-13 官方文档核对；向导共享提供商目录并提供模型 Tab 候选，Claude 默认 Fable 5.1，OpenAI 默认 Responses，修正协议路径与 Astra 请求参数。
+
+### 聊天媒体与可靠投递
+
+- 新增 `--chat-setup-cli`，支持 SSH/CMD 下扫码链接、凭据输入、状态、鉴权检查和解绑。
+- 聊天 ask_user 接入原任务等待通道，验证码不再排队启动新 Agent；高危授权与补充输入隔离。
+- 新增聊天选项「本次会话允许所有高危操作」；同类授权由聊天服务保存，修复下一条消息的新 Agent 子进程丢失授权。授权按渠道/发送者/会话隔离，重置、切换、断开或重启服务后失效。
+- 补齐钉钉图片、文件、语音和图文混排入站，以及媒体上传发送；已知 sessionWebhook 过期时改用应用机器人主动回复。飞书补齐独立视频和富文本视频的文件资源解析。
+
+- 修复微信 `/new` 后旧任务仍等待确认、后续消息持续排队：重置/切换会话会取消原执行与排队任务，旧确认与进度失效，旧会话取消结果不串入新会话。
+- QQ 新媒体域名使用平台下载器兼容代理 Fake-IP；增加精确域名匹配、下载失败的脱敏域名/原因日志和取消信号传递。问候不再被提示为继续历史任务。
+- 补齐飞书、企业微信应用及 OneBot/微信桥接的图片、文件、语音入站路径；飞书与企业微信新增图片和文件发送，桥接渠道按标准/兼容扩展发送附件。
+- 文件与文本共用持久化 outbox，支持重启恢复、投递查询和手动重试；同名附件独立保存，出站文件不再互相覆盖或随任务目录清理丢失。
+- 图片作为真实视觉内容交给模型；下载/解密失败、桥接不支持媒体、投递结果未知分别反馈，避免误报文件已送达。
+- 入站附件在任务入队后立即预取到本地缓存，避免微信/QQ 等短时签名 URL 在排队期间过期；回调 JSON 不能指定本机路径。
+
+### 构建与发布校验
+
+- Gorilla WebSocket 升级到 1.5.3，修复 GO-2026-6278 涉及的掩码随机数问题。
+- 收紧 MCP 旧 PID 记录的清理条件，避免对无关服务发送终止信号；投递序号增加溢出校验。
+
+### 自适应 Agent 执行
+
+- 主 Agent 与 subagent 初始步数窗口可按新工具结果自动延长；增加共享推理轮次预算、无进展暂停和子任务未完成的结构化状态。
+- 预算暂停保存会话进度，聊天可直接发送“继续”；保留用户停止、执行超时与既有权限机制。
+
+### 原生工具与扩展
+
+- 点对点适配 HawkEye MCP Server 1.0.7：`page_token` 续读（拒绝数字 `cursor`）、搜索运算符、验证码专用链、证书诊断、视口快照默认值，以及播放校验 JS 的低风险放行。
+- 默认模型目录增加 ChatGPT 6（`gpt-6-astra` / `gpt-6` / `chatgpt-6`）与 DeepSeek 官方多模态 ID `deepseek-flash`（产品名 V4.1 Flash）。OpenAI / DeepSeek 空 `model_name` 分别落到这两项，`vision_mode: auto` 自动开图片。旧配置里的 `deepseek-v4.1-flash` 会在请求前改写成 `deepseek-flash`，避免官方 400。
+- Claude / Gemini / 千问 / Grok 目录对齐 2026-09 官方阵容：补 `claude-sonnet-5`、`claude-haiku-4-5`、`gemini-3.6-flash`、`qwen3.8-max` 默认与 `grok-4.3`；Claude 5 Messages 接口按官方要求预留 thinking 的 `max_tokens`（默认 64K）并解析 `thinking` / `refusal`。
+- 聊天服务不再摘成独立后台：TUI / `--chat-setup` 退出时停止对应 `--chat` 子进程；子进程还会监视父进程 PID，父进程消失后自行退出。已绑定或已配置通道时，启动 DeepSentry 会自动拉起聊天；未配置则不启动。
+- stdio 拉起的 HawkEye MCP 随主进程退出：立即结束本进程拉起的 Server，并监视父 PID。目标端口已被 Cursor 或其他实例占用时，改为连接已有 Streamable HTTP（`GET /mcp` 的 405 视为在线），不再 spawn 抢端口、也不会强杀仍在监听的服务。
+- 聊天任务不再误把 `mcp_servers` 里的脚本路径当成旧格式 `name:command:args`；与 `mcp_server_configs` 重复时静默跳过。微信/飞书等通道的高危操作改为在同一会话里确认（允许本次 / 本会话同类 / 拒绝），不再用 `--batch -y` 自动放行。
+- 微信/IM 续聊每条消息重置步数预算：会话打满 `max_steps` 后不会再对「在吗」立刻空失败；预算暂停后可直接发送“继续”沿用会话。
+- 聊天里说「重启会话」会新开上下文；说「切换会话」列出近期会话，回复序号即可恢复。
 
 ## [2.0.3 Ultimate] - 2026-09-03
 
@@ -182,7 +235,8 @@
 - 自动生成包含任务步骤、执行输出和结论的 Markdown 报告。
 - 提供内置 SSH/SFTP 能力和 Windows、macOS、Linux 多架构单文件程序。
 
-[未发布]: https://github.com/asaotomo/DeepSentry/compare/DeepSentry_v2.0.3_Ultimate...HEAD
+[未发布]: https://github.com/asaotomo/DeepSentry/compare/DeepSentry_v2.0.4_Ultimate...HEAD
+[2.0.4 Ultimate]: https://github.com/asaotomo/DeepSentry/releases/tag/DeepSentry_v2.0.4_Ultimate
 [2.0.3 Ultimate]: https://github.com/asaotomo/DeepSentry/releases/tag/DeepSentry_v2.0.3_Ultimate
 [2.0.2 Ultimate]: https://github.com/asaotomo/DeepSentry/releases/tag/DeepSentry_v2.0.2_Ultimate
 [2.0.1 Ultimate]: https://github.com/asaotomo/DeepSentry/releases/tag/DeepSentry_v2.0.1_Ultimate

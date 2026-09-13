@@ -55,7 +55,8 @@ func renderMarkdownConfirm(markdown, timestamp string, width int) string {
 	innerW := max(1, width-styleConfirmBox.GetHorizontalFrameSize())
 	header := mdH2Style.Render(sanitizeTUIText(timestamp) + "⚠ 需要确认")
 	body := renderMarkdownBlocks(markdown, innerW)
-	footer := mdBoldStyle.Render("Y 本次 · A 会话同类 · N/Esc 拒绝 · Enter 拒绝")
+	footer := mdBoldStyle.Render("Y 本次 · A 会话同类 · S 本次会话允许所有高危操作") + "\n" +
+		mdBoldStyle.Render("N/Esc 拒绝 · Enter 拒绝")
 	return styleConfirmBox.Width(styleRenderWidth(styleConfirmBox, width)).Render(fitRenderedBlock(header+"\n\n"+body+"\n\n"+footer, innerW))
 }
 

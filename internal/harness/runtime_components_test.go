@@ -70,6 +70,47 @@ func TestFilesystemMiddlewareControllerWorkspaceLifecycle(t *testing.T) {
 	}
 }
 
+func TestReadableReportArtifactsStayWriteProtected(t *testing.T) {
+	dir := t.TempDir()
+	reports := filepath.Join(dir, "reports")
+	if err := os.MkdirAll(filepath.Join(reports, "mcp-artifacts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(reports, "chat"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	md := filepath.Join(reports, "report_20260913_132548.md")
+	if err := os.WriteFile(md, []byte("# 巡检结论\n风险与建议\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	png := filepath.Join(reports, "mcp-artifacts", "shot.png")
+	if err := os.WriteFile(png, []byte("png"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(reports, "chat", "daemon.key")
+	if err := os.WriteFile(secret, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if isProtectedReadPath(md) || isProtectedReadPath(png) {
+		t.Fatal("session report and screenshots should be readable")
+	}
+	if !isProtectedReadPath(secret) || !isProtectedPath(md) {
+		t.Fatal("chat secrets and report writes must stay protected")
+	}
+	mw := NewFilesystemMiddleware(nil)
+	ctx := &StepContext{State: NewAgentState("")}
+	read, handled, err := mw.HandleAction(ctx, &AgentAction{Type: ActionReadFile, Path: md})
+	if err != nil || !handled || !strings.Contains(read.Output, "巡检结论") {
+		t.Fatalf("read report=%#v handled=%v err=%v", read, handled, err)
+	}
+	if result, handled, _ := mw.HandleAction(ctx, &AgentAction{Type: ActionReadFile, Path: secret}); !handled || !strings.Contains(result.Output, "禁止") {
+		t.Fatalf("chat secret read result=%#v handled=%v", result, handled)
+	}
+	if result, handled, _ := mw.HandleAction(ctx, &AgentAction{Type: ActionWriteFile, Path: md, Content: "overwrite"}); !handled || !strings.Contains(result.Output, "禁止") {
+		t.Fatalf("report write result=%#v handled=%v", result, handled)
+	}
+}
+
 func TestToolsAndSubAgentMiddlewareValidationPaths(t *testing.T) {
 	tools.ConfigureEnabled(nil, nil)
 	mw := NewToolsMiddleware()

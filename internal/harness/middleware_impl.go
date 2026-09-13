@@ -415,6 +415,12 @@ func (m *ToolsMiddleware) HandleAction(ctx *StepContext, action *AgentAction) (*
 		persLabel = "控制端"
 	}
 	skip := risk == tools.RiskLow
+	if name == "inspection_run" {
+		switch strings.ToLower(strings.TrimSpace(action.ToolArgs["action"])) {
+		case "", "inventory", "report":
+			skip = true
+		}
+	}
 	return &ActionResult{
 		Output:       fmt.Sprintf("【工具 %s | 视角:%s 结果】\n%s", name, persLabel, out),
 		SkipApproval: skip,
@@ -695,7 +701,7 @@ func (m *SubAgentMiddleware) runParallelSubAgents(ctx *StepContext, action *Agen
 		}
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("【并行子 Agent 协作结果】任务 %d · 成功 %d · 失败 %d · 并发 %d · 用户步数上限 %d",
+	b.WriteString(fmt.Sprintf("【并行子 Agent 协作结果】任务 %d · 成功 %d · 失败 %d · 并发 %d · 配置步数窗口 %d",
 		len(tasks), succeeded, failed, concurrency, subAgentCap(ctx.SubAgentMaxSteps)))
 	if skipped := len(action.ParallelTasks) - len(tasks); skipped > 0 {
 		b.WriteString(fmt.Sprintf(" · 去重/忽略 %d", skipped))
@@ -1089,11 +1095,11 @@ func (m *FilesystemMiddleware) readFile(ctx *StepContext, path string) (*ActionR
 	if path == "" {
 		return &ActionResult{Output: "path 不能为空", SkipApproval: true}, true, nil
 	}
-	if isProtectedPath(path) {
+	if isProtectedReadPath(path) {
 		return &ActionResult{Output: "禁止读取受保护路径", SkipApproval: true}, true, nil
 	}
 
-	local := isControllerLocalPath(path)
+	local := isControllerLocalPath(path) || isReadableReportArtifact(path)
 	data, err := readTargetOrLocalWithExecutor(path, ctx.Executor)
 	if err != nil {
 		return &ActionResult{Output: fmt.Sprintf("读取失败: %v", err), SkipApproval: true}, true, nil
@@ -1174,11 +1180,11 @@ func (m *FilesystemMiddleware) grep(ctx *StepContext, path, pattern string) (*Ac
 	if path == "" || pattern == "" {
 		return &ActionResult{Output: "path 和 pattern 不能为空", SkipApproval: true}, true, nil
 	}
-	if isProtectedPath(path) {
+	if isProtectedReadPath(path) {
 		return &ActionResult{Output: "禁止搜索受保护路径", SkipApproval: true}, true, nil
 	}
 
-	local := isControllerLocalPath(path)
+	local := isControllerLocalPath(path) || isReadableReportArtifact(path)
 	var output string
 	var err error
 	if local {
@@ -1378,6 +1384,56 @@ func sanitizeSessionID(id string) string {
 			return '_'
 		}
 	}, id)
+}
+
+func isProtectedReadPath(path string) bool {
+	if isReadableReportArtifact(path) {
+		return false
+	}
+	return isProtectedPath(path)
+}
+
+func isReadableReportArtifact(path string) bool {
+	rest, ok := reportsRelative(path)
+	if !ok {
+		return false
+	}
+	rest = strings.ToLower(filepath.ToSlash(rest))
+	if rest == "chat" || strings.HasPrefix(rest, "chat/") || strings.Contains(rest, "/chat/") {
+		return false
+	}
+	if rest == "schedules" || strings.HasPrefix(rest, "schedules/") {
+		return false
+	}
+	base := filepath.Base(rest)
+	if strings.HasPrefix(base, "report_") && (strings.HasSuffix(base, ".md") || strings.HasSuffix(base, ".txt")) {
+		return !strings.Contains(rest, "chat/")
+	}
+	for _, prefix := range []string{"mcp-artifacts", "inspections", "browser"} {
+		if rest == prefix || strings.HasPrefix(rest, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func reportsRelative(path string) (string, bool) {
+	path = expandUserPath(path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	slash := filepath.ToSlash(filepath.Clean(abs))
+	lower := strings.ToLower(slash)
+	idx := strings.Index(lower, "/reports/")
+	if idx < 0 {
+		return "", false
+	}
+	rest := slash[idx+len("/reports/"):]
+	if rest == "" || rest == "." || strings.Contains(rest, "..") {
+		return "", false
+	}
+	return rest, true
 }
 
 func isProtectedPath(path string) bool {

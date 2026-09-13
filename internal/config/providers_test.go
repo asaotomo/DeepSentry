@@ -28,13 +28,38 @@ func TestNormalizeChatURL(t *testing.T) {
 	}
 }
 
+func TestCanonicalModelIDRewritesRetiredDeepSeekIDs(t *testing.T) {
+	cases := map[string]string{
+		"deepseek-v4.1-flash":                 "deepseek-flash",
+		"DeepSeek-V4.1-Flash":                 "deepseek-flash",
+		"deepseek-v4.1-flash-expires-on-0910": "deepseek-flash",
+		"deepseek-flash":                      "deepseek-flash",
+		"deepseek-v4-pro":                     "deepseek-v4-pro",
+	}
+	for in, want := range cases {
+		if got := CanonicalModelID(in); got != want {
+			t.Fatalf("CanonicalModelID(%q)=%q, want %q", in, got, want)
+		}
+	}
+
+	cfg := &Config{Provider: "deepseek", ModelName: "deepseek-v4.1-flash"}
+	ApplyProviderDefaults(cfg)
+	if cfg.ModelName != "deepseek-flash" {
+		t.Fatalf("existing config was not rewritten: %q", cfg.ModelName)
+	}
+	capabilities := cfg.EffectiveModelCapabilities()
+	if !capabilities.SupportsVision || capabilities.ContextWindowTokens != 1_000_000 {
+		t.Fatalf("rewritten model lost vision/context: %+v", capabilities)
+	}
+}
+
 func TestApplyProviderDefaultsLatestChineseVisionModels(t *testing.T) {
 	tests := []struct {
 		provider string
 		model    string
 		url      string
 	}{
-		{"deepseek", "deepseek-v4-flash-vision-exp", "https://api.deepseek.com/chat/completions"},
+		{"deepseek", "deepseek-flash", "https://api.deepseek.com/chat/completions"},
 		{"glm", "glm-5.3-flash", "https://open.bigmodel.cn/api/paas/v4/chat/completions"},
 		{"minimax", "MiniMax-M3", "https://api.minimax.cn/v1/chat/completions"},
 		{"mimo", "mimo-v2.5", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"},
@@ -60,7 +85,7 @@ func TestProviderDefaultsChineseOpenAICompatible(t *testing.T) {
 		urlPart  string
 		model    string
 	}{
-		{"qwen", "dashscope.aliyuncs.com", "qwen3.7-plus"},
+		{"qwen", "dashscope.aliyuncs.com", "qwen3.8-max"},
 		{"qianfan", "qianfan.baidubce.com", "qianfan-code-latest"},
 		{"volcengine", "ark.cn-beijing.volces.com", "ark-code-latest"},
 		{"hunyuan", "tokenhub.tencentmaas.com", "hy4-preview"},
@@ -110,12 +135,21 @@ func TestFindModelPresetPreservesTextOnlyVariants(t *testing.T) {
 		{"minimax", "MiniMax-M2.7-highspeed", false, 204_800},
 		{"mimo", "mimo-v2.5-pro", false, 1_000_000},
 		{"custom", "GLM-5.3-FLASH", true, 1_000_000},
+		{"openai", "gpt-6-astra", true, 1_050_000},
+		{"openai", "gpt-6", true, 1_050_000},
+		{"custom", "chatgpt6", true, 1_050_000},
+		{"deepseek", "deepseek-flash", true, 1_000_000},
+		{"deepseek", "deepseek-v4.1-flash", true, 1_000_000},
 		{"openai", "gpt-5.6", true, 1_050_000},
 		{"anthropic", "claude-opus-5", true, 1_000_000},
+		{"anthropic", "claude-sonnet-5", true, 1_000_000},
+		{"anthropic", "claude-haiku-4-5", true, 200_000},
 		{"google", "gemini-3.8-flash", true, 1_048_576},
+		{"qwen", "qwen3.8-max", true, 1_000_000},
 		{"qwen", "qwen3.7-plus", true, 1_000_000},
 		{"tencent_hy", "hy4-preview", false, 1_000_000},
 		{"grok", "grok-4.6", true, 500_000},
+		{"xai", "grok-4.3", true, 1_000_000},
 	} {
 		preset, ok := FindModelPreset(test.provider, test.model)
 		if !ok || preset.SupportsVision != test.vision || preset.ContextWindowTokens != test.context {
@@ -131,10 +165,10 @@ func TestProviderDefaultsOfficialLatestModels(t *testing.T) {
 		urlPart  string
 		protocol string
 	}{
-		{"openai", "gpt-5.6", "api.openai.com/v1", ProtocolOpenAIChat},
-		{"anthropic", "claude-opus-5", "api.anthropic.com/v1", ProtocolAnthropicMessages},
+		{"openai", "gpt-6-astra", "api.openai.com/v1", ProtocolOpenAIResponses},
+		{"anthropic", "claude-fable-5-1", "api.anthropic.com/v1", ProtocolAnthropicMessages},
 		{"google", "gemini-3.8-flash", "generativelanguage.googleapis.com/v1beta/openai", ProtocolOpenAIChat},
-		{"qwen", "qwen3.7-plus", "dashscope.aliyuncs.com/compatible-mode/v1", ProtocolOpenAIChat},
+		{"qwen", "qwen3.8-max", "dashscope.aliyuncs.com/compatible-mode/v1", ProtocolOpenAIChat},
 		{"hunyuan", "hy4-preview", "tokenhub.tencentmaas.com/v1", ProtocolOpenAIChat},
 		{"xai", "grok-4.6", "api.x.ai/v1", ProtocolOpenAIChat},
 	}
@@ -200,4 +234,47 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestProtocolEndpointRouting(t *testing.T) {
+	for _, tc := range []struct{ protocol, input, want string }{
+		{ProtocolOpenAIResponses, "https://api.openai.com/v1", "https://api.openai.com/v1/responses"},
+		{ProtocolOpenAIResponses, "https://proxy.test/prefix/v1/chat/completions", "https://proxy.test/prefix/v1/responses"},
+		{ProtocolOpenAIResponses, "https://api.deepseek.com", "https://api.deepseek.com/responses"},
+		{ProtocolAnthropicMessages, "https://proxy.test/anthropic/v1", "https://proxy.test/anthropic/v1/messages"},
+	} {
+		c := Config{Provider: "custom", APIProtocol: tc.protocol, ApiURL: tc.input, ModelName: "pinned-model"}
+		ApplyProviderDefaults(&c)
+		if c.ApiURL != tc.want || c.ModelName != "pinned-model" {
+			t.Fatalf("routing: %+v", c)
+		}
+		ApplyProviderDefaults(&c)
+		if c.ApiURL != tc.want {
+			t.Fatalf("non-idempotent: %s", c.ApiURL)
+		}
+	}
+	c := Config{Provider: "openai"}
+	ApplyProviderDefaults(&c)
+	if c.ApiURL != "https://api.openai.com/v1/responses" {
+		t.Fatal(c.ApiURL)
+	}
+}
+func TestModelSuggestionsExcludeRetiredAndUnverifiedIDs(t *testing.T) {
+	for _, id := range ProviderModelSuggestions("openai") {
+		if id == "chatgpt6" || id == "gpt-6-sol" {
+			t.Fatal(id)
+		}
+	}
+	ids := ProviderModelSuggestions("anthropic")
+	if len(ids) < 2 || ids[0] != "claude-fable-5-1" {
+		t.Fatal(ids)
+	}
+	for _, id := range ProviderModelSuggestions("deepseek") {
+		if id == "deepseek-v4-flash" {
+			t.Fatal("retired default offered")
+		}
+	}
+	if len(ProviderModelSuggestions("ollama")) != 0 {
+		t.Fatal("invented installed local models")
+	}
 }

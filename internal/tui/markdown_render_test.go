@@ -207,7 +207,7 @@ func TestMarkdownCodeBlockWrapsWithoutLosingCommand(t *testing.T) {
 
 func TestMarkdownConfirmationShowsOnceSessionAndDenyChoices(t *testing.T) {
 	rendered := stripANSIForTest(renderMarkdownConfirm("编辑文件", "[08:15:00] ", 80))
-	for _, want := range []string{"Y 本次", "A 会话同类", "N/Esc 拒绝", "Enter 拒绝"} {
+	for _, want := range []string{"Y 本次", "A 会话同类", "S 本次会话允许所有高危操作", "N/Esc 拒绝", "Enter 拒绝"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("confirmation panel missing %q:\n%s", want, rendered)
 		}

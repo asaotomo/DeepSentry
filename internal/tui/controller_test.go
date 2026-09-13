@@ -44,6 +44,16 @@ func TestInterruptQueuesHistoryMutationUntilRunStops(t *testing.T) {
 	}
 }
 
+func TestAllowAllSessionGrantClearedOnNewSession(t *testing.T) {
+	c := newSessionController(SessionConfig{Agent: &harness.DeepAgent{}})
+	c.allowAllSession = true
+	c.sessionApprovals["scope"] = "evaluate"
+	c.clearSessionApprovals()
+	if c.allowAllSession || len(c.sessionApprovals) != 0 {
+		t.Fatal("session-wide approval survived reset")
+	}
+}
+
 func TestControllerPreservesImageAttachmentsForInitialAndInterruptedTurns(t *testing.T) {
 	history := []analyzer.Message{}
 	attachment := analyzer.ImageAttachment{Path: "/tmp/evidence.png", Name: "evidence.png", MediaType: "image/png", SHA256: "abc"}

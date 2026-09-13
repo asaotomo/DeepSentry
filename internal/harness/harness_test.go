@@ -490,6 +490,21 @@ func TestClassifyFofaMapMCPUsesLocalActionRisk(t *testing.T) {
 	}
 }
 
+func TestResolveInspectionRunRiskUsesAction(t *testing.T) {
+	tool, ok := tools.Get("inspection_run")
+	if !ok {
+		t.Fatal("inspection_run tool should exist")
+	}
+	for _, actionName := range []string{"", "inventory", "report"} {
+		if risk, _ := resolveToolRisk(AgentAction{ToolName: tool.Name, ToolArgs: map[string]string{"action": actionName}}, tool); risk != tools.RiskLow {
+			t.Fatalf("inspection_run %q should be low risk, got %s", actionName, risk)
+		}
+	}
+	if risk, _ := resolveToolRisk(AgentAction{ToolName: tool.Name, ToolArgs: map[string]string{"action": "collect"}}, tool); risk != tools.RiskMedium {
+		t.Fatalf("inspection_run collect should stay medium risk, got %s", risk)
+	}
+}
+
 func TestResolveZIPPasswordRecoverRiskUsesAction(t *testing.T) {
 	tool, ok := tools.Get("zip_password_recover")
 	if !ok {
@@ -594,3 +609,30 @@ func (*capturingSudoExecutor) ListTargetDir(string) ([]string, error) {
 }
 func (*capturingSudoExecutor) IsRemote() bool { return true }
 func (*capturingSudoExecutor) Close()         {}
+
+func TestParseMCPServerSpecAcceptsScriptPathAndLegacyName(t *testing.T) {
+	cfg, ok := parseMCPServerSpec("/opt/hawkeye/hawkeye-mcp-server.mjs,--port,19016")
+	if !ok || cfg.Command != "node" || cfg.Name != "hx0-hawkeye" || len(cfg.Args) != 3 || cfg.Args[2] != "19016" {
+		t.Fatalf("script spec: %#v ok=%v", cfg, ok)
+	}
+	legacy, ok := parseMCPServerSpec("browser:node:/tmp/server.mjs,--port,9")
+	if !ok || legacy.Name != "browser" || legacy.Command != "node" || legacy.Args[0] != "/tmp/server.mjs" {
+		t.Fatalf("legacy spec: %#v ok=%v", legacy, ok)
+	}
+	if _, ok := parseMCPServerSpec("not-a-spec"); ok {
+		t.Fatal("invalid spec should fail")
+	}
+}
+
+func TestMCPSpecCoveredByStructuredMatchesHawkEyeScript(t *testing.T) {
+	cfg, ok := parseMCPServerSpec("/opt/hawkeye/hawkeye-mcp-server.mjs,--port,19016")
+	if !ok {
+		t.Fatal("parse")
+	}
+	if !mcpSpecCoveredByStructured(cfg, []config.MCPServerConfig{{
+		Name: "hx0-hawkeye", Command: "node",
+		Args: []string{"/opt/hawkeye/hawkeye-mcp-server.mjs", "--port", "19016"},
+	}}) {
+		t.Fatal("structured HawkEye config should cover leftover mcp_servers path")
+	}
+}

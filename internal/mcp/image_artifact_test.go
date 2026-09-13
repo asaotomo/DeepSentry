@@ -108,7 +108,7 @@ func TestHawkEyePromptPrioritizesWorkflowAndCoreTools(t *testing.T) {
 	}
 	prompt := r.FormatPrompt()
 	for _, want := range []string{
-		"HawkEye MCP 1.0.6 深度适配工作流", "禁止再用 execute", "browser_select_option",
+		"HawkEye MCP 1.0.7 深度适配工作流", "禁止再用 execute", "browser_select_option",
 		"clickMode=trusted", "inputMode=trusted", "GET 无 body", "playbackRate",
 		"mcp:hawkeye__browser_tabs",
 	} {

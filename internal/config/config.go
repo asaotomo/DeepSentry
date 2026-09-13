@@ -27,7 +27,7 @@ func setViperDefaults() {
 	viper.SetDefault("provider", "deepseek")
 	viper.SetDefault("api_protocol", "auto")
 	viper.SetDefault("api_url", "https://api.deepseek.com")
-	viper.SetDefault("model_name", "deepseek-v4-flash-vision-exp")
+	viper.SetDefault("model_name", "deepseek-flash")
 	viper.SetDefault("temperature", 0.0)
 	viper.SetDefault("model_profile", "auto")
 	viper.SetDefault("model_parameter_b", 0.0)
@@ -62,6 +62,12 @@ func setViperDefaults() {
 	viper.SetDefault("llm_retries", 3)
 	viper.SetDefault("ssh_command_timeout_sec", 90)
 	viper.SetDefault("ssh_max_output_bytes", 512*1024)
+	viper.SetDefault("execution_budget.enabled", true)
+	viper.SetDefault("execution_budget.max_steps", 180)
+	viper.SetDefault("execution_budget.subagent_max_steps", 90)
+	viper.SetDefault("execution_budget.total_steps", 300)
+	viper.SetDefault("execution_budget.extension_steps", 15)
+	viper.SetDefault("execution_budget.no_progress_steps", 8)
 	viper.SetDefault("max_steps", 30)
 	viper.SetDefault("subagent_max_steps", 15)
 	viper.SetDefault("controller_proxy", "")
@@ -89,6 +95,8 @@ func setViperDefaults() {
 
 // Config 结构体定义
 type Config struct {
+	Chat ChatConfig `mapstructure:"chat"`
+
 	// --- LLM 配置 ---
 	Provider    string  `mapstructure:"provider"`     // openai|anthropic|google|deepseek|qwen|hunyuan|teleai|minimax|mimo|glm|custom
 	APIProtocol string  `mapstructure:"api_protocol"` // openai_chat|anthropic_messages|openai_responses|auto
@@ -117,12 +125,13 @@ type Config struct {
 	TraceDir      string             `mapstructure:"trace_dir"`
 	TerminalTheme string             `mapstructure:"terminal_theme"` // auto|dark|light
 
-	LLMTimeoutSec        int `mapstructure:"llm_timeout_sec"`
-	LLMRetries           int `mapstructure:"llm_retries"`
-	SSHCommandTimeoutSec int `mapstructure:"ssh_command_timeout_sec"`
-	SSHMaxOutputBytes    int `mapstructure:"ssh_max_output_bytes"`
-	MaxSteps             int `mapstructure:"max_steps"`
-	SubAgentMaxSteps     int `mapstructure:"subagent_max_steps"`
+	LLMTimeoutSec        int                   `mapstructure:"llm_timeout_sec"`
+	LLMRetries           int                   `mapstructure:"llm_retries"`
+	SSHCommandTimeoutSec int                   `mapstructure:"ssh_command_timeout_sec"`
+	SSHMaxOutputBytes    int                   `mapstructure:"ssh_max_output_bytes"`
+	ExecutionBudget      ExecutionBudgetConfig `mapstructure:"execution_budget"`
+	MaxSteps             int                   `mapstructure:"max_steps"`
+	SubAgentMaxSteps     int                   `mapstructure:"subagent_max_steps"`
 
 	// --- SSH 配置 ---
 	TargetProtocol           string         `mapstructure:"target_protocol"` // local|ssh|telnet|ftp，空值兼容旧 ssh_host
@@ -183,19 +192,20 @@ type Config struct {
 	ArchiveMaxTotalBytes int64  `mapstructure:"archive_max_total_bytes"`
 
 	// --- Controller scheduler / notifications ---
-	SchedulerEnabled     bool   `mapstructure:"scheduler_enabled"`
-	SchedulerStore       string `mapstructure:"scheduler_store"`
-	SchedulerIntervalSec int    `mapstructure:"scheduler_interval_sec"`
-	SchedulerTimezone    string `mapstructure:"scheduler_timezone"`
-	DingTalkWebhook      string `mapstructure:"dingtalk_webhook"`
-	DingTalkSecret       string `mapstructure:"dingtalk_secret"`
-	FeishuWebhook        string `mapstructure:"feishu_webhook"`
-	FeishuSecret         string `mapstructure:"feishu_secret"`
-	EmailGatewayURL      string `mapstructure:"email_gateway_url"`
-	EmailGatewayToken    string `mapstructure:"email_gateway_token"`
-	EmailGatewayHeader   string `mapstructure:"email_gateway_header"`
-	EmailTo              string `mapstructure:"email_to"`
-	EmailFrom            string `mapstructure:"email_from"`
+	Inspection           InspectionConfig `mapstructure:"inspection"`
+	SchedulerEnabled     bool             `mapstructure:"scheduler_enabled"`
+	SchedulerStore       string           `mapstructure:"scheduler_store"`
+	SchedulerIntervalSec int              `mapstructure:"scheduler_interval_sec"`
+	SchedulerTimezone    string           `mapstructure:"scheduler_timezone"`
+	DingTalkWebhook      string           `mapstructure:"dingtalk_webhook"`
+	DingTalkSecret       string           `mapstructure:"dingtalk_secret"`
+	FeishuWebhook        string           `mapstructure:"feishu_webhook"`
+	FeishuSecret         string           `mapstructure:"feishu_secret"`
+	EmailGatewayURL      string           `mapstructure:"email_gateway_url"`
+	EmailGatewayToken    string           `mapstructure:"email_gateway_token"`
+	EmailGatewayHeader   string           `mapstructure:"email_gateway_header"`
+	EmailTo              string           `mapstructure:"email_to"`
+	EmailFrom            string           `mapstructure:"email_from"`
 
 	// --- Benchmark platform integrations ---
 	BenchmarkBaseURL string `mapstructure:"benchmark_base_url"`

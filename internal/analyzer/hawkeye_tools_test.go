@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"ai-edr/internal/mcp"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +59,8 @@ func TestHawkEyeIntentRoutesCompleteWorkflowSchemas(t *testing.T) {
 		{"抓包后检查 POST 的请求头和请求体", []string{"hawkeye_capture_state", "hawkeye_capture_start", "hawkeye_capture_history", "hawkeye_capture_inspect", "hawkeye_request_get"}},
 		{"拦截请求、改包后放行，最后关闭拦截", []string{"hawkeye_scope", "hawkeye_intercept"}},
 		{"搜索资料并深入调研页面", []string{"browser_search", "browser_fetch", "browser_research", "browser_read_text"}},
+		{"识别登录页验证码并填写", []string{"browser_captcha_assist", "browser_snapshot"}},
+		{"检查当前站点证书和 TLS", []string{"browser_security"}},
 	}
 	for _, test := range tests {
 		selected := selectMCPToolsForContext(tools, 15, test.query, nil)
@@ -69,6 +72,9 @@ func TestHawkEyeIntentRoutesCompleteWorkflowSchemas(t *testing.T) {
 			if !got[want] {
 				t.Errorf("query %q missing %s; selected=%v", test.query, want, got)
 			}
+		}
+		if strings.Contains(test.query, "验证码") && got["hawkeye_evaluate"] {
+			t.Errorf("captcha workflow should not prefer evaluate: %v", got)
 		}
 	}
 }

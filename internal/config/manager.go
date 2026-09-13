@@ -760,7 +760,7 @@ func validateConfigNode(doc *yaml.Node) error {
 	reader.SetDefault("provider", "deepseek")
 	reader.SetDefault("api_protocol", "auto")
 	reader.SetDefault("api_url", "https://api.deepseek.com")
-	reader.SetDefault("model_name", "deepseek-v4-flash-vision-exp")
+	reader.SetDefault("model_name", "deepseek-flash")
 	reader.SetDefault("model_profile", "auto")
 	reader.SetDefault("ssh_host_key_policy", "accept-new")
 	reader.SetDefault("ssh_known_hosts_path", "~/.deepsentry/known_hosts")

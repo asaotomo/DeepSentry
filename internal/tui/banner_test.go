@@ -13,21 +13,22 @@ import (
 
 func TestRenderWelcomeBannerFitsWidth(t *testing.T) {
 	info := StartupInfo{
-		Version:    "2.0",
-		BuildTime:  "2026-06-26",
-		ModelInfo:  "lmstudio / local-model",
-		ConnInfo:   "Fleet 多目标: 2 台",
-		ConfigPath: "/opt/deepsentry/config.yaml",
-		ReportPath: "/opt/deepsentry/reports/report.md",
-		OS:         "Darwin",
-		Arch:       "arm64",
-		Username:   "demo",
-		WorkDir:    "/opt/deepsentry",
-		ModeLine:   "🔌 [模式切换] 本地执行模式",
-		ToolCount:  51,
-		MCPCount:   2,
-		MCPSummary: "2 个已连接 · fofamap 15 · hx0-hawkeye 51",
-		Tip:        "Tab 聚焦输入框，Enter 发送安全任务",
+		Version:     "2.0",
+		BuildTime:   "2026-06-26",
+		ModelInfo:   "lmstudio / local-model",
+		ConnInfo:    "Fleet 多目标: 2 台",
+		ConfigPath:  "/opt/deepsentry/config.yaml",
+		ReportPath:  "/opt/deepsentry/reports/report.md",
+		OS:          "Darwin",
+		Arch:        "arm64",
+		Username:    "demo",
+		WorkDir:     "/opt/deepsentry",
+		ModeLine:    "🔌 [模式切换] 本地执行模式",
+		ToolCount:   51,
+		MCPCount:    2,
+		MCPSummary:  "2 个已连接 · fofamap 15 · hx0-hawkeye 51",
+		ChatSummary: "已启用：微信、QQ、企业微信",
+		Tip:         "Tab 聚焦输入框，Enter 发送安全任务",
 	}
 	for _, w := range []int{96, 120, 140} {
 		cw := ChromeContentWidth(w)
@@ -63,6 +64,9 @@ func TestRenderWelcomeBannerFitsWidth(t *testing.T) {
 		}
 		if !strings.Contains(plain, "MCP") || !strings.Contains(plain, "fofamap 15") {
 			t.Fatalf("banner should list MCP connections and tool counts: %q", plain)
+		}
+		if !strings.Contains(plain, "聊天") || !strings.Contains(plain, "已启用：微信、QQ、企业微信") {
+			t.Fatalf("banner should list enabled chat services: %q", plain)
 		}
 		if !strings.Contains(plain, "目录") || !strings.Contains(plain, "报告") {
 			t.Fatalf("banner should include workdir and report paths: %q", plain)
@@ -232,7 +236,8 @@ func TestRandomUsageTipStablePool(t *testing.T) {
 		"fleet_inventory", "parallel_tasks", "核心线索", "schedule_task", "headless_browser",
 		"pcap_analyze", "db_config_audit", "MCP", "Native Tool schema", "checkpoint",
 		"zip_password_recover", "fofa_rules", "bilibili-play", "ssh_legacy_compat",
-		"nuclei_plan", "mcp_server_configs", "⌘V",
+		"nuclei_plan", "mcp_server_configs", "⌘V", "Ctrl+A", "生成报告",
+		"inspection_run", "重启会话", "kind=inspection", "captcha_assist",
 	} {
 		if !strings.Contains(joined, feature) {
 			t.Fatalf("tip pool missing latest capability %q", feature)

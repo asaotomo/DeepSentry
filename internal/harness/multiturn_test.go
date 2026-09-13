@@ -1,8 +1,10 @@
 package harness
 
 import (
-	"ai-edr/internal/analyzer"
+	"strings"
 	"testing"
+
+	"ai-edr/internal/analyzer"
 )
 
 func TestCountUserTurns(t *testing.T) {
@@ -38,5 +40,18 @@ func TestMultiTurnExtraPrompt(t *testing.T) {
 	h = append(h, analyzer.Message{Role: "user", Content: "follow up"})
 	if p := MultiTurnExtraPrompt(true, &h); p == "" {
 		t.Fatal("second user turn should inject follow-up prompt")
+	}
+	if !strings.Contains(MultiTurnExtraPrompt(true, &h), "不要把本次追问当成新会话") {
+		t.Fatal("follow-up prompt should discourage re-introduction")
+	}
+	first := []analyzer.Message{{Role: "user", Content: "你好"}}
+	if p := ChatReplyExtraPrompt(true, &first); p == "" || !strings.Contains(p, "手机 IM") {
+		t.Fatalf("first-turn chat prompt missing: %q", p)
+	}
+	if p := ChatReplyExtraPrompt(true, &h); p == "" || !strings.Contains(p, "续聊") {
+		t.Fatalf("follow-up chat prompt missing: %q", p)
+	}
+	if p := ChatReplyExtraPrompt(false, &h); p != "" {
+		t.Fatal("chat reply prompt should be opt-in")
 	}
 }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -86,3 +87,6 @@ func isUnsafeFormatRune(r rune) bool {
 		return false
 	}
 }
+
+// Only applied to non-paste key events: copied code remains unchanged.
+var leakedMouseReport = regexp.MustCompile(`(?:\x1b)?\[<\d{1,3};\d{1,6};\d{1,6}[Mm]`)

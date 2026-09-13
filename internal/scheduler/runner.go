@@ -14,6 +14,7 @@ import (
 
 	"ai-edr/internal/config"
 	"ai-edr/internal/executor"
+	"ai-edr/internal/inspection"
 )
 
 type Runner struct {
@@ -202,7 +203,12 @@ func (r *Runner) runOne(task Task, now time.Time) Task {
 }
 
 func (r *Runner) executeInspection(task Task, now time.Time) (string, string, error) {
+	if len(r.Config.Inspection.Devices) > 0 {
+		report, err := inspection.Run(context.Background(), r.Config, task.Selector)
+		return report.Markdown, "巡检报告：" + report.Markdown + "；Word：" + report.Word, err
+	}
 	command := inspectionCommand()
+	failures := 0
 	var b strings.Builder
 	b.WriteString("# DeepSentry 定时巡检报告\n\n")
 	b.WriteString(fmt.Sprintf("- 任务: %s\n", task.Name))
@@ -217,7 +223,21 @@ func (r *Runner) executeInspection(task Task, now time.Time) (string, string, er
 		if strings.TrimSpace(selector) == "" {
 			selector = "all"
 		}
-		results := executor.RunFleet(r.Config.Targets, selector, command, 3)
+		selected := executor.MatchTargets(r.Config.Targets, selector)
+		if len(selected) == 0 {
+			return "", "", fmt.Errorf("没有匹配的巡检目标")
+		}
+		for _, t := range selected {
+			if t.DeviceType != "" && t.DeviceType != "linux" {
+				return "", "", fmt.Errorf("设备 %s 需要 inspection.devices 检查项；禁止将 Linux 命令用于网络设备", t.Name)
+			}
+		}
+		results := executor.RunFleet(selected, "all", command, 3)
+		for _, item := range results {
+			if !item.Success || strings.TrimSpace(item.Output) == "" {
+				failures++
+			}
+		}
 		b.WriteString(executor.FormatFleetResults(results))
 	} else if executor.Current != nil {
 		out, err := executor.Current.Run(command)
@@ -226,6 +246,7 @@ func (r *Runner) executeInspection(task Task, now time.Time) (string, string, er
 		b.WriteString(truncateReport(out, 24000))
 		b.WriteString("\n```\n")
 		if err != nil {
+			failures++
 			b.WriteString(fmt.Sprintf("\n执行错误: %v\n", err))
 		}
 	} else {
@@ -236,7 +257,10 @@ func (r *Runner) executeInspection(task Task, now time.Time) (string, string, er
 	if err != nil {
 		return "", "", err
 	}
-	return reportPath, "巡检完成，报告: " + reportPath, nil
+	if failures > 0 {
+		return reportPath, "", fmt.Errorf("%d 个目标采集失败；报告保留失败详情", failures)
+	}
+	return reportPath, "基础状态采集完成（未配置设备判定规则，需复核），报告: " + reportPath, nil
 }
 
 func (r *Runner) executeAgent(task Task, now time.Time) (string, string, error) {

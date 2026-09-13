@@ -2,6 +2,21 @@ package tui
 
 // bannerTips 启动 Banner 随机展示的使用小技巧（程序启动时抽取一条并固定）。
 var bannerTips = []string{
+	// 聊天与巡检
+	"SSH/CMD 使用 --chat-setup-cli 配置机器人、查看连接状态和解绑",
+	"图片验证码无法识别时，可通过机器人收图并回复验证码，原任务继续",
+	"用鹰眼巡检后直接说「生成报告」，会出带封面和截图的 Word，不必写 JSON 或装 pandoc",
+	"Word 巡检报告先写结论，再写详情和建议；截图跟在对应章节后面",
+	"inspection_run action=report 会自动找最新会话报告和真实截图",
+	"确认操作：Y 本次，A 会话同类，S 本次会话允许所有高危操作",
+	"启动面板「聊天」一行显示已启用的微信、QQ、企业微信、飞书等机器人",
+	"已配置聊天通道时启动 DeepSentry 会自动拉起机器人，退出 TUI 一并停止",
+	"对机器人说「重启会话」开新上下文，说「切换会话」可按序号恢复",
+	"聊天预算用尽或暂停后直接发「继续」，不必重开任务",
+	"微信/QQ/飞书可直接发图片给模型看，排队前会先把附件下载到本地",
+	"每日巡检用 schedule_task kind=inspection，到点出 Word 并可推到群里",
+	"聊天里的高危操作在同一会话确认，不会再用 --batch 自动放行",
+
 	// 输入与快捷键
 	"Tab 聚焦输入框，Enter 发送安全任务",
 	"等待补充信息时，输入选项编号即可继续",
@@ -10,7 +25,7 @@ var bannerTips = []string{
 	"Esc 退出输入模式，↑↓/jk 滚动日志",
 	"Shift+Enter / Alt+Enter 可在输入框内换行",
 	"macOS 可直接 ⌘V 粘贴截图，Windows/Linux 用 Ctrl+V",
-	"Ctrl+U 清空当前输入，Ctrl+L 清屏",
+	"Ctrl+A 全选输入内容，再按删除即可清空；Ctrl+U 也能一键清空，Ctrl+L 清屏",
 	"按 G 快速跳到日志底部",
 	"PgUp / PgDown 翻页浏览 Agent 输出",
 	"鼠标滚轮可上下滚动日志区域",
@@ -78,6 +93,7 @@ var bannerTips = []string{
 	"产品/OA/VPN 查询先 fofa_rules，原样使用返回的 app=，不要编造",
 	"ZIP 解密第一步 zip_password_recover；有掩码用 recover+mask",
 	"HawkEye 已连接时浏览网页走 HawkEye，不要再用内置 browser_browse",
+	"HawkEye 验证码用 captcha_assist 分析/提交，不要执行页面脚本读图",
 	"B 站播放/倍速/全屏先 load_skill(\"bilibili-play\")，合集用 ?p=N",
 	"解出 flag{...} 后 finish 提交，不要把它当成 shell 命令 execute",
 	"mcp_server_configs 请写 Python 与 mcp_server.py 的绝对路径",
@@ -113,7 +129,7 @@ var bannerTips = []string{
 	"远程 SSH：mem_info、port_listen 等在目标机执行",
 	"控制端工具 ping、nmap_scan 从 DeepSentry 进程发起",
 	"Native Tool Calling 已启用时可更稳定地调用内置工具",
-	"高风险操作按 Y 仅批准本次，A 允许本会话同类操作，N 拒绝",
+	"高风险操作按 Y 仅批准本次，A 允许本会话同类操作，S 允许本次会话所有高危操作，N 拒绝",
 	"Shell 规则判高后会先由 AI 复核，只有双高危或复核失败才人工确认",
 	"2>&1 只合并错误输出，不再被误判为写文件重定向",
 	"Batch 模式自动批准操作，仅建议在隔离环境使用",

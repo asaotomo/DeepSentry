@@ -227,6 +227,13 @@ var explicitContracts = map[string]ToolContract{
 		},
 		Examples: []map[string]string{{"remote_path": "/var/log/auth.log", "local_path": "~/.deepsentry/workspace/auth.log"}},
 	},
+	"chat_send_file": {
+		Args: []ArgSpec{
+			{Name: "path", Type: "string", Required: true, Description: "本机文件绝对路径，例如桌面或下载目录中的文件", Example: "/Users/me/Desktop/report.pdf"},
+			{Name: "name", Type: "string", Description: "发给用户时显示的文件名，默认用原名"},
+		},
+		Examples: []map[string]string{{"path": "/Users/me/Desktop/report.pdf"}, {"path": "~/Desktop/screenshot.png", "name": "截图.png"}},
+	},
 	"file_upload": {
 		Args: []ArgSpec{
 			{Name: "local_path", Type: "string", Description: "控制端源文件路径", Required: true, Example: "~/.deepsentry/workspace/check.sh"},
@@ -309,6 +316,7 @@ var explicitContracts = map[string]ToolContract{
 		},
 		Examples: []map[string]string{{"action": "list"}, {"action": "start", "listen_host": "127.0.0.1", "listen_port": "1080", "allow_lan": "false"}},
 	},
+	"inspection_run": {Args: []ArgSpec{{Name: "action", Type: "string", Enum: []string{"inventory", "collect", "report"}, Description: "默认 inventory 返回设备清单供 HawkEye 巡检；collect 执行固定检查；report 把当前或指定 Markdown/JSON 编成 Word"}, {Name: "selector", Type: "string", Description: "配置中的巡检设备名称或标签，默认 all"}, {Name: "source", Type: "string", Description: "report 的 Markdown 或 JSON 路径；省略则自动选用当前/最新巡检会话报告"}, {Name: "markdown_path", Type: "string", Description: "source 的别名，指向 .md 审计报告"}, {Name: "manifest_path", Type: "string", Description: "兼容旧用法，指向结构化 JSON"}}, Examples: []map[string]string{{"action": "inventory", "selector": "all"}, {"action": "report"}, {"action": "report", "source": "reports/report_20260913_132548.md"}}},
 	"schedule_task": {
 		Args: []ArgSpec{
 			{Name: "action", Type: "string", Description: "定时任务动作", Required: true, Enum: []string{"plan", "add", "list", "remove", "run", "run-due"}},

@@ -28,6 +28,8 @@ import (
 
 // DeepAgent Deep Agent Harness（对标 deepagents create_deep_agent）
 type DeepAgent struct {
+	budgetPolicy   config.ExecutionBudgetConfig
+	budgetLedger   *executionLedger
 	Middleware     []Middleware
 	State          *AgentState
 	Catalog        *skills.SkillCatalog
@@ -114,12 +116,12 @@ func NewDeepAgent(cfg Config, opts ...Option) (*DeepAgent, error) {
 	// MCP 服务器
 	for _, spec := range cfg.MCPServers {
 		if err := connectMCPServer(spec); err != nil {
-			fmt.Printf("%sMCP 连接失败 [%s]: %v\n", termui.Prefix("⚠️", "[WARN]"), spec, err)
+			reportMCPWarning(spec, err)
 		}
 	}
 	for _, spec := range config.GlobalConfig.MCPServers {
 		if err := connectMCPServer(spec); err != nil {
-			fmt.Printf("%sMCP 连接失败 [%s]: %v\n", termui.Prefix("⚠️", "[WARN]"), spec, err)
+			reportMCPWarning(spec, err)
 		}
 	}
 	for _, spec := range cfg.MCPServerConfigs {
@@ -127,7 +129,7 @@ func NewDeepAgent(cfg Config, opts ...Option) (*DeepAgent, error) {
 			if spec.Required {
 				return nil, fmt.Errorf("必需 MCP 连接失败 [%s]: %w", spec.Name, err)
 			}
-			fmt.Printf("%sMCP 连接失败 [%s]: %v\n", termui.Prefix("⚠️", "[WARN]"), spec.Name, err)
+			reportMCPWarning(spec.Name, err)
 		}
 	}
 	for _, spec := range config.GlobalConfig.MCPServerConfigs {
@@ -135,7 +137,7 @@ func NewDeepAgent(cfg Config, opts ...Option) (*DeepAgent, error) {
 			if spec.Required {
 				return nil, fmt.Errorf("必需 MCP 连接失败 [%s]: %w", spec.Name, err)
 			}
-			fmt.Printf("%sMCP 连接失败 [%s]: %v\n", termui.Prefix("⚠️", "[WARN]"), spec.Name, err)
+			reportMCPWarning(spec.Name, err)
 		}
 	}
 
@@ -208,15 +210,130 @@ func mergeMiddleware(stack []Middleware, mw Middleware) []Middleware {
 }
 
 func connectMCPServer(spec string) error {
-	parts := strings.SplitN(spec, ":", 3)
-	if len(parts) < 2 {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil
+	}
+	cfg, ok := parseMCPServerSpec(spec)
+	if !ok {
 		return fmt.Errorf("格式应为 name:command:arg1,arg2")
+	}
+	if mcpSpecCoveredByStructured(cfg, config.GlobalConfig.MCPServerConfigs) {
+		return nil
+	}
+	return mcp.Connect(cfg)
+}
+
+func parseMCPServerSpec(spec string) (mcp.ServerConfig, bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return mcp.ServerConfig{}, false
+	}
+	if looksLikeFileMCPSpec(spec) {
+		fields := splitCommaArgs(spec)
+		if len(fields) == 0 {
+			return mcp.ServerConfig{}, false
+		}
+		script := fields[0]
+		return mcp.ServerConfig{
+			Name:    inferMCPName(script),
+			Type:    "stdio",
+			Command: inferMCPCommand(script),
+			Args:    append([]string{script}, fields[1:]...),
+		}, true
+	}
+	parts := strings.SplitN(spec, ":", 3)
+	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return mcp.ServerConfig{}, false
 	}
 	var args []string
 	if len(parts) == 3 && parts[2] != "" {
-		args = strings.Split(parts[2], ",")
+		args = splitCommaArgs(parts[2])
 	}
-	return mcp.Connect(mcp.ServerConfig{Name: parts[0], Command: parts[1], Args: args})
+	return mcp.ServerConfig{
+		Name:    strings.TrimSpace(parts[0]),
+		Type:    "stdio",
+		Command: strings.TrimSpace(parts[1]),
+		Args:    args,
+	}, true
+}
+
+func looksLikeFileMCPSpec(spec string) bool {
+	first := strings.TrimSpace(strings.Split(spec, ",")[0])
+	if first == "" {
+		return false
+	}
+	if strings.HasPrefix(first, "/") || strings.HasPrefix(first, "./") || strings.HasPrefix(first, "../") {
+		return true
+	}
+	if len(first) >= 3 && ((first[0] >= 'A' && first[0] <= 'Z') || (first[0] >= 'a' && first[0] <= 'z')) && first[1] == ':' && (first[2] == '\\' || first[2] == '/') {
+		return true
+	}
+	if strings.Contains(first, ":") {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(first))
+	return ext == ".mjs" || ext == ".js" || ext == ".cjs" || ext == ".py"
+}
+
+func splitCommaArgs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func inferMCPCommand(script string) string {
+	switch strings.ToLower(filepath.Ext(script)) {
+	case ".py":
+		return "python3"
+	default:
+		return "node"
+	}
+}
+
+func inferMCPName(script string) string {
+	base := strings.TrimSuffix(filepath.Base(script), filepath.Ext(script))
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "mcp"
+	}
+	if strings.Contains(strings.ToLower(base), "hawkeye") || strings.Contains(strings.ToLower(base), "hx0") {
+		return "hx0-hawkeye"
+	}
+	return base
+}
+
+func mcpSpecCoveredByStructured(cfg mcp.ServerConfig, configs []config.MCPServerConfig) bool {
+	script := ""
+	for _, arg := range cfg.Args {
+		ext := strings.ToLower(filepath.Ext(arg))
+		if ext == ".mjs" || ext == ".js" || ext == ".cjs" || ext == ".py" {
+			script = arg
+			break
+		}
+	}
+	for _, existing := range configs {
+		if existing.Disabled {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(existing.Name), cfg.Name) {
+			return true
+		}
+		if script == "" {
+			continue
+		}
+		joined := strings.ToLower(strings.Join(append([]string{existing.Command}, existing.Args...), "\n"))
+		if strings.Contains(joined, strings.ToLower(script)) || strings.Contains(joined, strings.ToLower(filepath.Base(script))) {
+			return true
+		}
+	}
+	return false
 }
 
 func connectStructuredMCPServer(spec config.MCPServerConfig) error {
@@ -1013,6 +1130,25 @@ func (a *DeepAgent) RunLoop(cfg RunLoopConfig) (runResult RunResult) {
 	}()
 
 	stepCount := a.StartStep
+	if cfg.ChatReply && maxSteps > 0 {
+		// Each IM message is a new turn with a fresh step budget. Keep history
+		// from the checkpoint, otherwise a finished 30/30 session rejects
+		// "在吗" with an empty max_steps exit.
+		stepCount = 0
+	}
+	policy := config.GlobalConfig.ExecutionBudget
+	if cfg.ExecutionBudget != nil {
+		policy = *cfg.ExecutionBudget
+	}
+	a.budgetPolicy = policy
+	a.budgetLedger = nil
+	var lease *executionLease
+	budgetStart := stepCount
+	if policy.Enabled {
+		lease = newExecutionLease(maxSteps, false, policy)
+		a.budgetLedger = &executionLedger{limit: policy.Normalized().TotalSteps}
+		maxSteps = budgetStart + lease.limit
+	}
 	runResult = RunResult{Status: RunStatusMaxSteps, Reason: "max_steps", Step: stepCount, ReportPath: reportPath}
 	defer func() { runResult.Step = stepCount }()
 	consecutiveEmpty := 0
@@ -1098,13 +1234,45 @@ func (a *DeepAgent) RunLoop(cfg RunLoopConfig) (runResult RunResult) {
 		return
 	}
 
-	for stepCount < maxSteps {
+	drainInput := func() bool {
+		if cfg.DrainInput == nil || history == nil {
+			return false
+		}
+		inputs := cfg.DrainInput()
+		*history = append(*history, inputs...)
+		return len(inputs) > 0
+	}
+	for {
+		if lease != nil {
+			allowed, reason := lease.allow(stepCount - budgetStart)
+			if !allowed {
+				runResult.Reason = reason
+				a.saveCheckpointUI(stepCount, history, ui)
+				break
+			}
+			maxSteps = budgetStart + lease.limit
+			if reason == "extended" {
+				ui.Emit(UIEvent{Kind: EventInfo, Message: fmt.Sprintf("任务仍有新结果，执行窗口延长至 %d 步。", lease.limit)})
+			}
+		} else if stepCount >= maxSteps {
+			break
+		}
+
+		drainInput()
 		if shouldStop(stop) {
 			runResult.Status = RunStatusCancelled
 			runResult.Reason = "cancelled_before_step"
 			a.saveCheckpointUI(stepCount, history, ui)
 			ui.Emit(UIEvent{Kind: EventCheckpoint, Message: fmt.Sprintf("已停止，checkpoint 已保存。继续: deepsentry --resume %s", a.SessionID)})
 			break
+		}
+		if lease != nil {
+			if !a.budgetLedger.take(false) {
+				runResult.Reason = "shared_step_budget"
+				a.saveCheckpointUI(stepCount, history, ui)
+				break
+			}
+			lease.stalled++
 		}
 		stepCount++
 		ui.Emit(UIEvent{Kind: EventStepStart, Step: stepCount, MaxSteps: maxSteps})
@@ -1115,14 +1283,18 @@ func (a *DeepAgent) RunLoop(cfg RunLoopConfig) (runResult RunResult) {
 		}
 
 		extraPrompt := a.BuildSystemPrompt("")
+		if lease != nil {
+			extraPrompt += lease.prompt(stepCount-budgetStart, a.budgetLedger)
+		}
 		extraPrompt += MultiTurnExtraPrompt(cfg.MultiTurn, history)
+		extraPrompt += ChatReplyExtraPrompt(cfg.ChatReply, history)
 		if cfg.PlanMode {
 			extraPrompt += planModePrompt()
 		}
 		if cfg.CompetitionMode {
 			extraPrompt += competitionModePrompt()
 		}
-		if cfg.NonInteractive {
+		if cfg.NonInteractive && cfg.AwaitUserFn == nil {
 			extraPrompt += nonInteractivePrompt(cfg.PauseOnAskUser)
 		}
 		pinnedContext := ""
@@ -1207,6 +1379,10 @@ func (a *DeepAgent) RunLoop(cfg RunLoopConfig) (runResult RunResult) {
 			break
 		}
 
+		// A supplement received during inference invalidates the not-yet-executed action.
+		if drainInput() {
+			continue
+		}
 		action := ParseAction(resp)
 		action.Thought = security.RedactSensitiveText(action.Thought)
 		action.FinalReport = security.RedactSensitiveText(action.FinalReport)
@@ -1471,6 +1647,9 @@ func (a *DeepAgent) RunLoop(cfg RunLoopConfig) (runResult RunResult) {
 		} else {
 			result, err = actionHandler(stepCtx, &action)
 		}
+		if lease != nil {
+			lease.observe(action, result, err)
+		}
 		if err != nil {
 			failActionToolCalls(a.State, action)
 		} else {
@@ -1568,6 +1747,12 @@ func (a *DeepAgent) RunLoop(cfg RunLoopConfig) (runResult RunResult) {
 		}
 
 		a.saveCheckpointUI(stepCount, history, ui)
+	}
+	if runResult.Status == RunStatusMaxSteps {
+		a.saveCheckpointUI(stepCount, history, ui)
+	}
+	if cfg.ChatReply && runResult.Status == RunStatusMaxSteps {
+		ui.Emit(UIEvent{Kind: EventError, Message: fmt.Sprintf("本轮执行已暂停（%s），进度已保存。直接发送“继续”可沿用当前会话；也可补充具体要求。", runResult.Reason)})
 	}
 	return runResult
 }
@@ -1837,6 +2022,13 @@ func resolveToolRisk(action AgentAction, t *tools.Tool) (string, string) {
 			return tools.RiskHigh, "tsecbench hint/submit 会影响题目分数或提交记录"
 		default:
 			return tools.RiskHigh, "tsecbench action 不明确，无法判断真实风险"
+		}
+	case "inspection_run":
+		switch strings.ToLower(strings.TrimSpace(action.ToolArgs["action"])) {
+		case "", "inventory", "report":
+			return tools.RiskLow, "inspection_run 清单查询或本地编译 Word/Markdown"
+		default:
+			return tools.RiskMedium, "inspection_run collect 会登录设备采集"
 		}
 	case "zip_password_recover":
 		switch strings.ToLower(strings.TrimSpace(action.ToolArgs["action"])) {
@@ -2277,4 +2469,14 @@ func escapeJSON(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
+}
+
+// Chat subprocess diagnostics must never become part of the final answer.
+func reportMCPWarning(name string, err error) {
+	if os.Getenv("DEEPSENTRY_CHAT_CONFIRM_DIR") != "" {
+		data, _ := json.Marshal(map[string]string{"name": name, "error": err.Error()})
+		fmt.Fprintln(os.Stderr, "DEEPSENTRY_MCP_WARNING:"+string(data))
+		return
+	}
+	fmt.Printf("%sMCP 连接失败 [%s]: %v\n", termui.Prefix("⚠️", "[WARN]"), name, err)
 }

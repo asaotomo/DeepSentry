@@ -312,3 +312,32 @@ func TestRunLoopCoversAskEmptyErrorDenialAndToolFailureLifecycles(t *testing.T) 
 		})
 	}
 }
+
+func TestChatReplyResetsExhaustedStepBudget(t *testing.T) {
+	ui := &runLoopCaptureUI{}
+	agent := &DeepAgent{State: NewAgentState(""), RunID: "run_chat_budget", SessionID: "session_chat_budget", StartStep: 30}
+	history := []analyzer.Message{{Role: "user", Content: "在吗"}}
+	called := 0
+	model := func(analyzer.StepOptions) (analyzer.AgentResponse, error) {
+		called++
+		return analyzer.AgentResponse{Action: "finish", IsFinished: true, FinalReport: "在的"}, nil
+	}
+	runResult := agent.RunLoop(RunLoopConfig{
+		History: &history, ChatReply: true, PlanMode: true, MaxSteps: 30, UI: ui, ModelStep: model, Executor: &injectedExecutor{},
+	})
+	if runResult.Status != RunStatusCompleted {
+		t.Fatalf("status=%s want completed (%+v) called=%d", runResult.Status, runResult, called)
+	}
+	if called != 1 {
+		t.Fatalf("model steps=%d want 1", called)
+	}
+
+	agent.StartStep = 30
+	called = 0
+	runResult = agent.RunLoop(RunLoopConfig{
+		History: &history, ChatReply: false, PlanMode: true, MaxSteps: 30, UI: ui, ModelStep: model, Executor: &injectedExecutor{},
+	})
+	if runResult.Status != RunStatusMaxSteps || called != 0 {
+		t.Fatalf("classic resume should stay exhausted: status=%s called=%d", runResult.Status, called)
+	}
+}

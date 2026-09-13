@@ -136,6 +136,8 @@ func Run(name string, args map[string]string, rt Runtime) (string, error) {
 		return FileStrings(rt, arg(args, "path", "file"), argInt(args, "min_len", 4, 32), argInt(args, "limit", 500, 2000), arg(args, "pattern", "grep"))
 	case "document_parse":
 		return DocumentParse(rt, arg(args, "path", "file"), arg(args, "mode"), argInt(args, "max_text", 30000, 100000), argInt(args, "max_rows", 120, 1000), argInt(args, "max_sheets", 8, 50))
+	case "chat_send_file":
+		return ChatSendFile(arg(args, "path", "file", "local_path"), arg(args, "name", "filename"))
 	case "read_gzip":
 		return ReadGzip(rt, arg(args, "path", "file"), argInt(args, "lines", 200, 2000), arg(args, "pattern", "grep"))
 	case "read_log":
@@ -188,6 +190,8 @@ func Run(name string, args map[string]string, rt Runtime) (string, error) {
 		return TCPForward(rt, arg(args, "action"), arg(args, "listen_host", "lhost"), arg(args, "listen_port", "lport"), arg(args, "target_host", "rhost", "host"), arg(args, "target_port", "rport", "port"))
 	case "socks5_proxy":
 		return Socks5Proxy(rt, arg(args, "action"), arg(args, "listen_host", "lhost"), arg(args, "listen_port", "lport"), arg(args, "username", "user"), arg(args, "password", "pass"), argBool(args, "allow_lan"))
+	case "inspection_run":
+		return InspectionRun(args)
 	case "schedule_task":
 		return ScheduleTask(rt, args)
 	case "fleet_inventory":

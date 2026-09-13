@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,22 +17,31 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestHawkEyeV106ProfileCoversAuthoritativeServerContract(t *testing.T) {
+func TestHawkEyeV107ProfileCoversAuthoritativeServerContract(t *testing.T) {
 	if got := len(HawkEyeKnownToolNames()); got != 51 {
-		t.Fatalf("HawkEye 1.0.6 profile tool count=%d, want 51", got)
+		t.Fatalf("HawkEye 1.0.7 profile tool count=%d, want 51", got)
 	}
-	// In the combined product workspace this verifies DeepSentry directly
-	// against HawkEye's source without writing to that project. Standalone
-	// DeepSentry checkouts retain the fixed 51-tool profile test above.
-	sourcePath := filepath.Clean(filepath.Join("..", "..", "..", "Hx0-Chrome-鹰眼", "mcp-server", "hawkeye-mcp-server.mjs"))
+	sourcePath := ""
+	for _, candidate := range []string{
+		filepath.Clean(filepath.Join("..", "..", "hawkeye-mcp-server.mjs")),
+		filepath.Clean(filepath.Join("..", "..", "..", "Hx0-Chrome-鹰眼", "mcp-server", "hawkeye-mcp-server.mjs")),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			sourcePath = candidate
+			break
+		}
+	}
+	if sourcePath == "" {
+		t.Skip("authoritative HawkEye server source is not present")
+	}
 	raw, err := os.ReadFile(sourcePath)
-	if os.IsNotExist(err) {
-		t.Skip("authoritative HawkEye sibling checkout is not present")
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(raw)
+	if !strings.Contains(source, "const SERVER_VERSION = '1.0.7'") {
+		t.Fatalf("expected HawkEye 1.0.7 server, got %s", sourcePath)
+	}
 	start := strings.Index(source, "const TOOLS = [")
 	if start < 0 {
 		t.Fatal("HawkEye const TOOLS contract not found")
@@ -53,11 +64,12 @@ func TestHawkEyeV106ProfileCoversAuthoritativeServerContract(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		"clickMode", "inputMode", "save_to_file", "file_path", "overwrite",
-		"context_budget_chars", "cursor", "release_all", "fuzzingEnabled",
+		"context_budget_chars", "page_token", "next_page_token", "viewport_only",
+		"stableId", "exact", "authorized", "release_all", "fuzzingEnabled",
 		"hawkeye_capture_inspect", "hawkeye_request_mutate", "hawkeye_script_upsert",
 	} {
-		if !strings.Contains(toolBlock, fragment) {
-			t.Fatalf("authoritative HawkEye contract lost critical field/tool %q", fragment)
+		if !strings.Contains(source, fragment) {
+			t.Fatalf("authoritative HawkEye 1.0.7 contract lost critical field/tool %q", fragment)
 		}
 	}
 }
@@ -98,6 +110,8 @@ func TestHawkEyeRiskIsActionAware(t *testing.T) {
 		{"hawkeye_scope", map[string]string{"action": "set"}, MCPRiskHigh},
 		{"hawkeye_request_replay", nil, MCPRiskHigh},
 		{"hawkeye_evaluate", map[string]string{"code": "1+1"}, MCPRiskHigh},
+		{"hawkeye_evaluate", map[string]string{"code": "const v=document.querySelector('video'); ({paused:v.paused,currentTime:v.currentTime,playbackRate:v.playbackRate})"}, MCPRiskLow},
+		{"browser_security", nil, MCPRiskLow},
 	}
 	for _, test := range tests {
 		tool := &ExternalTool{OriginalName: test.name, Server: "hawkeye"}
@@ -123,7 +137,7 @@ func TestHawkEyeTimeoutsRespectLongOperationsAndExplicitOverride(t *testing.T) {
 func TestHawkEyeCallDefaultsAreBoundedAndExplicitValuesWin(t *testing.T) {
 	input := map[string]string{"compact": "false", "context_budget_chars": "120000"}
 	got := applyHawkEyeCallDefaults("browser_snapshot", input)
-	if got["compact"] != "false" || got["context_budget_chars"] != "120000" || got["max_elements"] != "160" {
+	if got["compact"] != "false" || got["context_budget_chars"] != "120000" || got["max_elements"] != "160" || got["viewport_only"] != "true" {
 		t.Fatalf("defaults overrode explicit values or were incomplete: %#v", got)
 	}
 	if _, mutated := input["max_elements"]; mutated {
@@ -141,6 +155,24 @@ func TestHawkEyeCallDefaultsAreBoundedAndExplicitValuesWin(t *testing.T) {
 	if click["clickMode"] != "trusted" {
 		t.Fatalf("fullscreen click should default to trusted: %#v", click)
 	}
+	cont := applyHawkEyeCallDefaults("browser_snapshot", map[string]string{
+		"page_token": "tok_abcDEF0123456789", "max_elements": "400", "cursor": "12",
+	})
+	if len(cont) != 1 || cont["page_token"] != "tok_abcDEF0123456789" {
+		t.Fatalf("continuation must send page_token alone: %#v", cont)
+	}
+	alias := applyHawkEyeCallDefaults("browser_read_text", map[string]string{"next_page_token": "opaqueTokenFromContext"})
+	if alias["page_token"] != "opaqueTokenFromContext" || alias["next_page_token"] != "" || alias["context_budget_chars"] != "" {
+		t.Fatalf("next_page_token should collapse to page_token only: %#v", alias)
+	}
+	numeric := applyHawkEyeCallDefaults("browser_snapshot", map[string]string{"cursor": "80", "compact": "false"})
+	if _, ok := numeric["cursor"]; ok {
+		t.Fatalf("numeric cursor must be stripped: %#v", numeric)
+	}
+	solve := applyHawkEyeCallDefaults("browser_captcha_assist", map[string]string{"action": "solve", "answer": "A8K2"})
+	if solve["authorized"] != "true" {
+		t.Fatalf("captcha solve should default authorized=true: %#v", solve)
+	}
 }
 
 func TestHawkEyeSnapshotOutputDropsElementDumpAndKeepsHint(t *testing.T) {
@@ -152,7 +184,7 @@ func TestHawkEyeSnapshotOutputDropsElementDumpAndKeepsHint(t *testing.T) {
 		},
 		"element_count": 2,
 		"url":           "https://www.bilibili.com/video/BV1test/",
-		"context":       map[string]any{"complete": true},
+		"context":       map[string]any{"complete": false, "next_page_token": "tokContinuePage01"},
 	}
 	out := formatHawkEyeMCPContent("browser_snapshot", []sdkmcp.Content{
 		&sdkmcp.TextContent{Text: "- button \"倍速\" [ref=f0:e23]\n- button \"全屏\" [ref=f0:e30]"},
@@ -162,6 +194,9 @@ func TestHawkEyeSnapshotOutputDropsElementDumpAndKeepsHint(t *testing.T) {
 	}
 	if !strings.Contains(out, "button \"倍速\"") || !strings.Contains(out, "browser_select_option") || !strings.Contains(out, "press_key") {
 		t.Fatalf("accessibility tree and interaction hint missing: %s", out)
+	}
+	if !strings.Contains(out, "next_page_token=tokContinuePage01") || strings.Contains(out, "next_cursor=") {
+		t.Fatalf("1.0.7 page token summary missing: %s", out)
 	}
 	click := formatHawkEyeMCPContent("browser_click", []sdkmcp.Content{
 		&sdkmcp.TextContent{Text: "clicked"},
@@ -176,6 +211,7 @@ func TestHawkEyeWorkflowPromptForbidsInstallSelfCheck(t *testing.T) {
 	for _, want := range []string{
 		"禁止再用 execute", "browser_select_option", "inputMode=trusted", "禁止 read_file",
 		"load_skill", "playbackRate", "canvas.drawImage", "browser_browse", "?p=N",
+		"page_token", "site:", "captcha_assist",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("workflow prompt missing %q", want)
@@ -247,6 +283,45 @@ func TestPreferExistingHawkEyeHTTPReusesOccupiedPort(t *testing.T) {
 	got, ok := preferExistingHawkEyeHTTP(cfg)
 	if !ok || got.Type != "streamable_http" || got.URL != server.URL+"/mcp" || got.Command != "" {
 		t.Fatalf("should reuse existing HawkEye HTTP: ok=%v cfg=%#v", ok, got)
+	}
+}
+
+func TestPreferExistingHawkEyeHTTPReuses405LikeRealServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "only GET probe", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Allow", "POST, DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	t.Cleanup(server.Close)
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ServerConfig{Name: "hx0-hawkeye", Command: "node", Args: []string{"/tmp/hawkeye-mcp-server.mjs", "--port", u.Port()}}
+	got, ok := preferExistingHawkEyeHTTP(cfg)
+	if !ok || got.Type != "streamable_http" || got.URL != server.URL+"/mcp" || got.Command != "" {
+		t.Fatalf("405 GET /mcp should reuse Streamable HTTP: ok=%v cfg=%#v", ok, got)
+	}
+}
+
+func TestPreferExistingHawkEyeHTTPReusesOccupiedTCPPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	cfg := ServerConfig{Name: "hx0-hawkeye", Command: "node", Args: []string{"hawkeye-mcp-server.mjs", "--port", port}}
+	got, ok := preferExistingHawkEyeHTTP(cfg)
+	if !ok || got.Type != "streamable_http" || got.URL != "http://127.0.0.1:"+port+"/mcp" {
+		t.Fatalf("occupied port should reuse Streamable HTTP: ok=%v cfg=%#v", ok, got)
 	}
 }
 

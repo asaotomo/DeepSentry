@@ -1,0 +1,67 @@
+# 巡检设备清单。把 inspection 段合并进已有 config.yaml。
+# 推荐：只填设备名、地址或已有 target、检查项名称；聊天里让 Agent 用鹰眼巡检，不必写 CSS。
+# 可选：给检查项加 command / 选择器，用于 --inspect 和不经过模型的每日调度。
+# 示例地址、选择器和命令必须按真实设备修改；日常只引用环境变量，不把密码写进报告。
+
+inspection:
+  output_dir: reports/inspections
+  concurrency: 3
+  device_timeout_sec: 180
+  devices:
+    # 聊天 + 鹰眼：无需选择器
+    - name: security-console
+      tags: [daily, security]
+      url: https://192.0.2.10
+      username_env: INSPECT_CONSOLE_USER
+      password_env: INSPECT_CONSOLE_PASSWORD
+      checks:
+        - name: 运行状态、CPU、内存与磁盘
+        - name: 最近一天安全告警与设备告警
+        - name: 关键异常截图与巡检结论
+    - name: core-switch
+      tags: [daily, network]
+      target: existing-switch-target # 对应已有 targets.name
+      checks:
+        - name: 板卡、接口与路由状态
+        - name: 最近一天告警日志
+
+    # 固定采集：SSH/Telnet 只读命令。查询语句按设备型号确认，禁止照搬 Linux 命令。
+    - name: linux-host
+      tags: [daily, servers]
+      target: existing-linux-target # 必须对应 targets 中的 name
+      checks:
+        - name: 内存状态
+          command: free -m
+        - name: 磁盘空间
+          command: df -h
+        - name: 系统负载
+          command: uptime
+
+    # 固定采集：网页选择器。无人值守模式用；验证码/MFA 不会自动绕过。
+    - name: security-console-fixed
+      tags: [daily, security]
+      url: https://192.0.2.10/login
+      username_env: INSPECT_CONSOLE_USER
+      password_env: INSPECT_CONSOLE_PASSWORD
+      username_selector: '#username'
+      password_selector: '#password'
+      submit_selector: 'button[type=submit]'
+      ready_selector: '#logged-in-navigation'
+      checks:
+        - name: CPU 使用率
+          url: https://192.0.2.10/dashboard
+          selector: '#cpu-panel'
+          screenshot: true
+          numeric_regex: 'CPU\s*[:：]\s*([0-9.]+)'
+          max_value: 80
+        - name: 设备运行状态
+          selector: '#device-health'
+          screenshot: true
+          expect_regex: '正常|Healthy|Online'
+          alert_regex: '故障|异常|Critical|Offline'
+        - name: 过去一天安全告警
+          # 时间范围参数与选择器仅为示例，必须验证页面确实返回过去一天日志。
+          url: https://192.0.2.10/alarms?range=24h
+          selector: '#alarm-table'
+          screenshot: true
+          alert_regex: '严重|高危|Critical|High'

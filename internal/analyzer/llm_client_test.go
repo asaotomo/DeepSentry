@@ -313,3 +313,125 @@ func TestEffectiveTemperaturePreservesConfiguredZero(t *testing.T) {
 		t.Fatalf("temperature 0.35 became %v", got)
 	}
 }
+
+func TestClaude5MessagesUsesThinkingBudgetAndParsesThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("anthropic-version") != "2023-06-01" || r.Header.Get("x-api-key") != "test" {
+			t.Fatalf("unexpected Anthropic headers: %#v", r.Header)
+		}
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if raw["model"] != "claude-opus-5" {
+			t.Fatalf("model=%v", raw["model"])
+		}
+		if raw["max_tokens"].(float64) != 65536 {
+			t.Fatalf("max_tokens=%v want 65536 for Claude 5 thinking", raw["max_tokens"])
+		}
+		cfg, _ := raw["output_config"].(map[string]interface{})
+		if cfg["effort"] != "high" {
+			t.Fatalf("output_config=%#v", raw["output_config"])
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"thinking","thinking":"plan first"},{"type":"text","text":"done"}],"usage":{"input_tokens":11,"output_tokens":22}}`))
+	}))
+	defer server.Close()
+
+	result, err := callAnthropic(context.Background(), config.Config{
+		ApiURL: server.URL + "/v1/messages", APIProtocol: config.ProtocolAnthropicMessages,
+		ModelName: "claude-opus-5", ApiKey: "test",
+	}, []Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "done" || result.ReasoningContent != "plan first" {
+		t.Fatalf("unexpected Claude 5 result: %#v", result)
+	}
+	if result.Usage.PromptTokens != 11 || result.Usage.CompletionTokens != 22 {
+		t.Fatalf("usage not parsed: %#v", result.Usage)
+	}
+}
+
+func TestClaudeHaikuSkipsEffortAndHonorsReservedOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if raw["max_tokens"].(float64) != 4096 {
+			t.Fatalf("max_tokens=%v want explicit reserved 4096", raw["max_tokens"])
+		}
+		if _, ok := raw["output_config"]; ok {
+			t.Fatalf("Haiku should not send effort: %#v", raw["output_config"])
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer server.Close()
+
+	if _, err := callAnthropic(context.Background(), config.Config{
+		ApiURL: server.URL + "/v1/messages", APIProtocol: config.ProtocolAnthropicMessages,
+		ModelName: "claude-haiku-4-5", ApiKey: "test", ReservedOutputTokens: 4096,
+	}, []Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaudeRefusalStopReasonIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"stop_reason":"refusal","content":[{"type":"text","text":"cannot help"}]}`))
+	}))
+	defer server.Close()
+
+	_, err := callAnthropic(context.Background(), config.Config{
+		ApiURL: server.URL + "/v1/messages", APIProtocol: config.ProtocolAnthropicMessages,
+		ModelName: "claude-sonnet-5", ApiKey: "test",
+	}, []Message{{Role: "user", Content: "hi"}})
+	if err == nil || !strings.Contains(err.Error(), "拒绝回答") {
+		t.Fatalf("expected refusal error, got %v", err)
+	}
+}
+
+func TestResponsesProtocolUsesSingleEndpointAndAstraParameters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gateway/v1/responses" {
+			t.Errorf("wrong path: %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if _, ok := body["temperature"]; ok {
+			t.Error("Astra rejects temperature")
+		}
+		if body["model"] != "gpt-6-astra" {
+			t.Error(body["model"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
+	}))
+	defer server.Close()
+	c := config.Config{Provider: "openai", ApiURL: server.URL + "/gateway/v1/chat/completions", APIProtocol: config.ProtocolOpenAIResponses, ModelName: "gpt-6-astra", Temperature: 0.5}
+	config.ApplyProviderDefaults(&c)
+	result, err := callLLMOnce(context.Background(), c, []Message{{Role: "user", Content: "test"}}, false, nil)
+	if err != nil || result.Content != "ok" || result.Usage.TotalTokens != 3 {
+		t.Fatalf("%+v %v", result, err)
+	}
+}
+
+func TestAstraChatMarshalingOmitsUnsupportedFields(t *testing.T) {
+	b, err := json.Marshal(ChatRequest{Model: "gpt-6-astra", Temperature: 0.5, MaxTokens: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req map[string]any
+	json.Unmarshal(b, &req)
+	if _, ok := req["temperature"]; ok {
+		t.Fatal(string(b))
+	}
+	if _, ok := req["max_tokens"]; ok {
+		t.Fatal(string(b))
+	}
+	if req["max_completion_tokens"] != float64(8192) {
+		t.Fatal(string(b))
+	}
+}

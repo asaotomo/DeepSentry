@@ -217,6 +217,33 @@ func (s *QuietSink) Emit(e UIEvent) {
 	}
 }
 
+// FinalReplySink 仅输出最终结论/错误，供聊天机器人手机回复使用。
+type FinalReplySink struct{}
+
+func NewFinalReplySink() *FinalReplySink { return &FinalReplySink{} }
+
+func (s *FinalReplySink) Emit(e UIEvent) {
+	switch e.Kind {
+	case EventFinish:
+		msg := strings.TrimSpace(ui.StripANSI(e.Message))
+		if msg != "" {
+			fmt.Println(msg)
+		}
+	case EventError, EventDenied:
+		msg := strings.TrimSpace(ui.StripANSI(e.Message))
+		if msg != "" {
+			fmt.Println(msg)
+		}
+	case EventAwaitUser:
+		msg := strings.TrimSpace(ui.StripANSI(e.Message))
+		if msg == "" {
+			return
+		}
+		fmt.Println("需要补充信息：")
+		fmt.Println(msg)
+	}
+}
+
 // WebShellSink 面向 WebShell/非 TTY 的低噪音执行日志输出。
 // 与 QuietSink 不同，它明确保留 step/action/result/finish，方便像 fscan 一样在终端直接看执行过程。
 type WebShellSink struct {

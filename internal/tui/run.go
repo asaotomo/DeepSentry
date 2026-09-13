@@ -53,7 +53,12 @@ func Run(cfg SessionConfig) error {
 	}
 
 	m := NewAgentModel(ctrl, title, status, cfg.MaxSteps, cfg.AwaitGoal, !cfg.AwaitGoal && len(*cfg.History) > 0, cfg.Startup)
+	defer m.stopOwnedChat()
 	defer m.cursorAnchor.release()
+	if note := m.startConfiguredChatIfNeeded(); note != "" {
+		m.startupInfo.Notices = append(m.startupInfo.Notices, note)
+		m.appendLine("info", note, "chat autostart")
+	}
 	m.restoreConversationHistory(*cfg.History)
 	m.refreshViewport()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion(), tea.WithOutput(newInputCursorOutput(os.Stdout, m.cursorAnchor)))

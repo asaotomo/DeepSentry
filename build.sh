@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DeepSentry v2.0.3 一键交叉编译
+# DeepSentry v2.0.4 一键交叉编译
 
 set -euo pipefail
 

@@ -4,6 +4,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // PlainTextMode reports whether terminal-facing text should avoid emoji,
@@ -77,13 +79,28 @@ func Sym(fancy, fallback string) string {
 	return fancy
 }
 
-// Prefix returns a symbol plus a trailing space when a symbol is present.
+// prefixGutter is the visible gap after every log/status icon. Two ASCII
+// spaces stay readable even when a wide emoji paints into the next cell.
+const prefixGutter = "  "
+
+// Prefix reserves a two-cell icon column and a consistent gutter before text.
+// VS-16 emoji (🛠️, ⚠️, ℹ️) often overflow one cell on macOS terminals, so they
+// get an extra pad; the following text still starts after a visible gap.
 func Prefix(fancy, fallback string) string {
 	s := Sym(fancy, fallback)
 	if s == "" {
 		return ""
 	}
-	return s + " "
+	if PlainTextMode() {
+		return s + " "
+	}
+	if strings.ContainsRune(s, '\uFE0F') || strings.ContainsRune(s, '\u20E3') {
+		s += " "
+	}
+	if w := ansi.StringWidth(s); w < 2 {
+		s += strings.Repeat(" ", 2-w)
+	}
+	return s + prefixGutter
 }
 
 func StripANSIIfPlain(s string) string {

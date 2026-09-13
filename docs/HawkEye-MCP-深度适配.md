@@ -12,13 +12,17 @@ mcp_server_configs:
     type: stdio
     command: node
     args:
-      - /absolute/path/Hx0-HawkEye/mcp-server/hawkeye-mcp-server.mjs
+      - /absolute/path/DeepSentry-deepagent/hawkeye-mcp-server.mjs
+      - --profile
+      - full
     startup_timeout_sec: 30
     tool_timeout_sec: 0
     required: false
 ```
 
-`tool_timeout_sec: 0` 或省略时，DeepSentry 会使用 HawkEye 分工具超时：`browser_research` 205 秒，Search / Fetch / Captcha / Fuzz 130 秒，快照/导航/截图等 100 秒，其余使用通用 60 秒。显式配置的超时值永远优先；如果需要 Research，不建议显式设得低于 205 秒。
+推荐使用本仓库随附的 HawkEye MCP Server **1.0.7**（`hawkeye-mcp-server.mjs`）。`--profile full` 暴露全部 51 个工具；`core` / `research` / `security` 会按能力裁剪，DeepSentry 只适配当前会话实际出现的工具。
+
+`tool_timeout_sec: 0` 或省略时，DeepSentry 客户端超时略高于 Server：`browser_research` 205 秒（Server 190），Search / Fetch / Captcha / Fuzz 130 秒（Server 120），快照/导航/截图等 100 秒（Server 90），其余使用通用 60 秒。显式配置的超时值永远优先；如果需要 Research，不建议显式设得低于 205 秒。扩展弹窗需打开 “HawkEye Browser Automation MCP”，VIP/Pro 才能桥接。
 
 也可先单独启动 HawkEye Server，再连接本机 Streamable HTTP：
 
@@ -31,9 +35,13 @@ mcp_server_configs:
 
 DeepSentry 允许回环 HTTP，非回环远程 MCP 仍强制 HTTPS。执行 `/mcp status` 应看到 Server 已连接和 51 个 Tools；浏览器扩展也应显示 MCP 桥已连接。同一个 `19016` 端口不要重复启动多个 HawkEye Server。
 
+stdio 配置发现目标端口（默认 19016）**已被占用**时，不会再 spawn 抢端口，而是改用 Streamable HTTP 连接已有服务：`http://127.0.0.1:<port>/mcp`。Cursor、其他 DeepSentry、或你手动 `node hawkeye-mcp-server.mjs` 拉起的实例都可以共用。HawkEye 对 `GET /mcp` 返回 405（只接受 POST）视为服务已在线。仅当端口空闲时才由本进程拉起 stdio Server。
+
+stdio 由 DeepSentry **自己拉起** 时，HawkEye MCP 进程归该二进制所有：正常退出会立即结束 Server；父进程消失后，随附的 `hawkeye-mcp-server.mjs` 也会自行退出。下次启动若发现上次残留、父进程已死、且端口并未在提供 MCP 服务的孤儿进程，会先清掉再拉起。已在监听的实例（包括 PPID=1 的守护进程）一律复用 HTTP，不会强杀。显式 `streamable_http` 只连已有服务，不接管生命周期。
+
 Server 进程或本地桥重启后，可执行 `/mcp reconnect hawkeye` 原地重建会话并重新发现全部能力。DeepSentry 不会自动重放断线前的工具调用，因为修改型操作可能已经在浏览器端生效但响应丢失。
 
-## 2. DeepSentry 识别的 HawkEye 1.0.6 能力面
+## 2. DeepSentry 识别的 HawkEye 1.0.7 能力面
 
 | 能力链 | HawkEye MCP 工具 |
 | --- | --- |
@@ -56,11 +64,13 @@ Server 进程或本地桥重启后，可执行 `/mcp reconnect hawkeye` 原地�
 1. 工具列表里已有 `hx0-hawkeye__*` 时，直接做用户任务，不要先检查 MCP 安装、端口或文件 MD5。
 2. 已知 URL 用 `browser_navigate`；搜索结果拿到 BV 链接后再 navigate 到完整视频 URL。整次任务最多 `browser_tabs action=new` 一次。
 3. `browser_snapshot` 取得 `ref` / 无障碍名称。只看本轮返回的树，不要 `read_file` snapshot artifact。
-4. 精确点击必须同时传 `text=无障碍名称` 和 `ref`。`element` 只是说明。
-5. 下拉/倍速/清晰度用 `browser_select_option`，`value` 传可见项（如 `2.0x`）。
+4. 精确点击必须同时传 `text=无障碍名称` 和 `ref`，点最小可交互节点。`element` 只是说明。也可用 `stableId`。
+5. 下拉/清晰度用 `browser_select_option`，`value` 传可见项（如 `1080P`）。B 站倍速不要点菜单。
 6. `browser_snapshot diff=true` 验证结果。不要对同一页并行连点。
 
-大页面优先 `browser_find` / `browser_read_text`。当 `complete=false` 时传入 `next_cursor`。DeepSentry 会丢掉 snapshot/click 返回里的巨大 `elements` JSON，只保留无障碍树和一行摘要，避免模型去读 artifact。
+大页面优先 `browser_find` / `browser_read_text`。当 `complete=false` 时，把 `context.next_page_token` **单独**作为 `page_token` 再调同一工具。1.0.7 **拒绝数字 `cursor`**，也不允许翻页时夹带 `url` / `query` / `max_elements`。DeepSentry 会自动把 `next_page_token` 收成只含 `page_token` 的续读调用，并丢掉 snapshot/click 返回里的巨大 `elements` JSON。
+
+公开检索必须带搜索运算符（`"精确短语"`、`site:`、`filetype:`、`intitle:`、`-排除`、`2020..2025`），不要只丢关键词。内网/实验环境自签证书 `browser_navigate` 会自动绕过拦截页；公网证书告警用 `browser_security` 看结构化 TLS 证据，不要靠截图判断。
 
 ### 播放、倍速和全屏
 
@@ -85,6 +95,10 @@ B 站等播放器不要靠连点控件碰运气。HawkEye 已连通时，**第�
 ```
 
 Chrome 由 HawkEye 通过 CDP trusted input 发送，Firefox 由 HawkEye native-input relay 发送真实 OS 输入。先选中/聚焦标签页，再发键或鼠标；必须用 `document.fullscreenElement` 或可见页面状态验证。`trusted` 返回失败时，不得退回 JS `dispatchEvent` 后声称已获得真实手势。
+
+### 验证码
+
+自有/登录图验证码只走 `browser_captcha_assist`：`analyze` 看放大裁图，只认大号深色前景字；再 `solve authorized=true`。禁止 `hawkeye_evaluate` 像素、禁止下载 `img src`、禁止点击图片（会刷新）。滑块用 `suggestedOffsetRatio`。reCAPTCHA / hCaptcha / Turnstile 等第三方挑战只报 `manual_required`，请用户手过。
 
 ### 抓包和请求头/体
 
@@ -141,9 +155,11 @@ DeepSentry 不再把所有 HawkEye MCP 调用粗暴当成同一级风险：
 | --- | --- |
 | `/mcp status` 无 51 个工具 | 确认 Node 路径、Server 文件路径，以及是否启动了匹配的 HawkEye Server |
 | 状态显示 `disconnected` / `failed` | 先恢复 HawkEye Server 或桥，再执行 `/mcp reconnect hawkeye`；若使用 OAuth，则执行 `/mcp login hawkeye` |
-| 提示 19016 被占用 | 停止重复 Server，或在 Server 和扩展两端使用相同 `HX0_MCP_WS_PORT` |
+| 提示 19016 被占用 | DeepSentry 会自动改连 `http://127.0.0.1:19016/mcp`；若仍失败，确认占用进程是 HawkEye 且扩展已打开 MCP 桥 |
 | Server 已连接但工具称扩展断开 | 检查扩展 MCP 桥状态、当前端口及扩展是否重载 |
 | Firefox 普通点击可用但全屏失败 | 使用 `inputMode/clickMode=trusted`，确认系统辅助功能/输入权限与页面聚焦，不用 JS fallback 伪装 user activation |
 | Research / Fetch 稳定在 60 秒断开 | 删除过低的显式 `tool_timeout_sec`，使用 0/省略让 DeepSentry 自动适配 |
 | 只看到请求行 | 用 `hawkeye_request_get` 显式请求 `request_headers` / `request_body`；GET 的空 body 本身正常 |
-| 大页面结果不全 | 检查 `structuredContent.context.complete/next_cursor`，分页继续取证 |
+| 大页面结果不全 | 检查 `structuredContent.context.complete/next_page_token`，只传 `page_token` 续读 |
+| 报 `Numeric continuation cursors` | 1.0.7 不再接受数字 `cursor`；改用上一轮返回的 `next_page_token` |
+| 验证码被刷新或 evaluate 失败 | 用 `browser_captcha_assist` analyze → solve，不要点图片、不要 `hawkeye_evaluate` 像素 |

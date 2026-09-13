@@ -116,7 +116,7 @@ func FormatRegistryPrompt() string {
 	}
 	b.WriteString("\n委派格式: {\"action\":\"task\",\"task_name\":\"log-analyst\",\"task_prompt\":\"具体任务描述\",\"task_max_steps\":18}\n")
 	b.WriteString("多子 Agent 并行协作: {\"action\":\"task\",\"parallel_tasks\":[{\"task_name\":\"log-analyst\",\"task_prompt\":\"分析登录日志\",\"task_max_steps\":20},{\"task_name\":\"network-analyst\",\"task_prompt\":\"分析异常连接\",\"task_max_steps\":14}]}\n")
-	b.WriteString("task_max_steps 是你的任务难度估算，运行器会按用户配置的 subagent_max_steps 截断。\n")
+	b.WriteString("task_max_steps 是初始任务难度估算。启用 execution_budget 时，有新的工具结果可自动续步；主 Agent 和所有子 Agent 共享任务预算。未启用时按 subagent_max_steps 截断。\n")
 	b.WriteString("协作规则: 只并行彼此独立的分工；每个 task_prompt 写清唯一范围、预期证据和停止条件，避免多个子 Agent 重复扫描同一对象。运行器会自动去重完全相同的任务并限制总并发。\n")
 	b.WriteString("子 Agent 会收到主目标、TODO 和已知核心线索；结果返回后先合并证据、标记冲突/不确定项并更新 TODO，再决定是否追加下一轮委派。不要把有依赖关系的步骤硬塞进同一批并发。\n")
 	return b.String()

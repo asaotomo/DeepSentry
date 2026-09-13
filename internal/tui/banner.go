@@ -31,6 +31,7 @@ type StartupInfo struct {
 	SubAgentCount int
 	SkillCount    int
 	MCPCount      int
+	ChatSummary   string
 	MCPSummary    string // 例如 "2 个已连接 · fofamap 15 · hx0-hawkeye 51"
 	TargetCount   int
 	MaxSteps      int
@@ -96,6 +97,7 @@ func renderCompactWelcomeBanner(info StartupInfo, width int) string {
 		rows = append(rows, compactBannerSection("MCP", summary, innerW))
 	}
 	rows = append(rows,
+		compactBannerSection("聊天", firstNonEmpty(info.ChatSummary, "未开启"), innerW),
 		compactBannerSection("小技巧", firstNonEmpty(info.Tip, "Tab 聚焦输入框"), innerW),
 		compactBannerSection("就绪", compactReadyText(info), innerW),
 	)
@@ -254,6 +256,7 @@ func buildBannerRight(info StartupInfo, width int, tip string) []string {
 		lines = append(lines, bannerLabeledLines("MCP", mcpSummary, width)...)
 	}
 	lines = append(lines,
+		bannerSection("聊天", firstNonEmpty(info.ChatSummary, "未开启"), width),
 		bannerSection("步数", steps, width),
 		bannerSection("时间", firstNonEmpty(info.StartedAt, time.Now().Format("2006-01-02 15:04:05")), width),
 		bannerSection("目录", truncatePath(info.WorkDir, width), width),

@@ -19,6 +19,7 @@ type SessionController struct {
 	mu                   sync.Mutex
 	confirmMu            sync.Mutex
 	sessionApprovals     map[string]string
+	allowAllSession      bool
 	sudoMu               sync.Mutex
 	running              bool
 	turn                 int
@@ -113,6 +114,10 @@ func (c *SessionController) confirmFn(action *harness.AgentAction) bool {
 	if stopped {
 		return false
 	}
+	if c.allowAllSession {
+		c.program.Send(uiEventMsg(harness.UIEvent{Kind: harness.EventRiskAuto, Message: "已允许本次会话所有高危操作，本次自动批准"}))
+		return true
+	}
 	scopeKey, scopeLabel := action.ApprovalScopeKey, action.ApprovalScopeLabel
 	if scopeKey == "" {
 		scopeKey, scopeLabel = harness.SessionApprovalScope(action)
@@ -133,7 +138,11 @@ func (c *SessionController) confirmFn(action *harness.AgentAction) bool {
 	if scopeLabel != "" {
 		prompt += "\n\n**A 本会话允许**：" + scopeLabel
 	}
+	prompt += "\n\n**S 本次会话允许所有高危操作**"
 	decision := WaitConfirm(c.program, action, prompt)
+	if decision == approvalAllowAllSession {
+		c.allowAllSession = true
+	}
 	if decision == approvalAllowSession && scopeKey != "" {
 		c.sessionApprovals[scopeKey] = scopeLabel
 	}
@@ -143,6 +152,7 @@ func (c *SessionController) confirmFn(action *harness.AgentAction) bool {
 func (c *SessionController) clearSessionApprovals() {
 	c.confirmMu.Lock()
 	c.sessionApprovals = make(map[string]string)
+	c.allowAllSession = false
 	c.confirmMu.Unlock()
 }
 
