@@ -54,6 +54,8 @@ func Run(name string, args map[string]string, rt Runtime) (string, error) {
 	defer unlock()
 
 	switch name {
+	case "computer_use":
+		return "", fmt.Errorf("computer_use 必须在带会话 ID 和中止信号的本地 Agent 中调用；请使用 Agent 工具入口")
 	case "ping":
 		return Ping(rt, arg(args, "host", "target", "ip"), argInt(args, "count", 4, 10))
 	case "dns_lookup":
@@ -171,7 +173,7 @@ func Run(name string, args map[string]string, rt Runtime) (string, error) {
 	case "flag_scan":
 		return FlagScan(rt, arg(args, "root", "path"), arg(args, "pattern", "grep"), argInt(args, "limit", 80, 500))
 	case "awd_service_check":
-		return AWDServiceCheck(rt, arg(args, "targets", "target", "urls"), argInt(args, "timeout", 3, 15))
+		return AWDServiceCheckWithOptions(arg(args, "targets", "target", "urls"), argInt(args, "timeout", 3, 15), argInt(args, "concurrency", 10, 32), argInt(args, "expected_status", 0, 599), arg(args, "contains"))
 	case "tsecbench":
 		return TSecBench(rt, args)
 	case "script_run":
@@ -190,8 +192,12 @@ func Run(name string, args map[string]string, rt Runtime) (string, error) {
 		return TCPForward(rt, arg(args, "action"), arg(args, "listen_host", "lhost"), arg(args, "listen_port", "lport"), arg(args, "target_host", "rhost", "host"), arg(args, "target_port", "rport", "port"))
 	case "socks5_proxy":
 		return Socks5Proxy(rt, arg(args, "action"), arg(args, "listen_host", "lhost"), arg(args, "listen_port", "lport"), arg(args, "username", "user"), arg(args, "password", "pass"), argBool(args, "allow_lan"))
+	case "http_proxy":
+		return HTTPProxy(rt, arg(args, "action"), arg(args, "listen_host", "lhost"), arg(args, "listen_port", "lport"), arg(args, "username", "user"), arg(args, "password", "pass"), argBool(args, "allow_lan"))
 	case "inspection_run":
 		return InspectionRun(args)
+	case "task_wait", "task_context":
+		return "", fmt.Errorf("此工具必须通过 Agent 会话调用")
 	case "schedule_task":
 		return ScheduleTask(rt, args)
 	case "fleet_inventory":
@@ -199,7 +205,7 @@ func Run(name string, args map[string]string, rt Runtime) (string, error) {
 	case "fleet_exec":
 		return FleetExec(rt, arg(args, "selector", "target", "targets"), arg(args, "command", "cmd"), argInt(args, "concurrency", 5, 20))
 	case "fleet_file":
-		return FleetFile(rt, arg(args, "selector", "target", "targets"), arg(args, "action"), arg(args, "remote_path", "remote", "path"), arg(args, "local_path", "local"))
+		return FleetFile(rt, arg(args, "selector", "target", "targets"), arg(args, "action"), arg(args, "remote_path", "remote", "path"), arg(args, "local_path", "local"), argInt(args, "concurrency", 5, 20))
 	case "config_manage":
 		return config.ManageConfig(args)
 	case "skill_market":

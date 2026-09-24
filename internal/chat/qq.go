@@ -186,6 +186,29 @@ func (s *Service) sendQQ(ctx context.Context, c config.ChatChannel, m Message, t
 	if seq == 0 {
 		seq = qqMessageSeq.Add(1)
 	}
-	_, err = apiJSON(ctx, s.client, "POST", "https://api.sgroup.qq.com"+path, map[string]string{"Authorization": "QQBot " + token}, map[string]any{"content": text, "msg_type": 0, "msg_id": m.ID, "msg_seq": seq})
-	return err
+	body := map[string]any{"content": text, "msg_type": 0, "msg_id": m.ID, "msg_seq": seq}
+	_, err = apiJSON(ctx, s.client, "POST", "https://api.sgroup.qq.com"+path, map[string]string{"Authorization": "QQBot " + token}, body)
+	if err == nil || m.ID == "" || !qqPassiveWindowGone(err) {
+		return err
+	}
+	// The passive reply window (group ~5 min, C2C ~60 min) expired. Retry once
+	// as an active push so a long task still reaches the user. A network-uncertain
+	// failure is excluded above so we never duplicate a message that may have sent.
+	delete(body, "msg_id")
+	delete(body, "msg_seq")
+	if _, aerr := apiJSON(ctx, s.client, "POST", "https://api.sgroup.qq.com"+path, map[string]string{"Authorization": "QQBot " + token}, body); aerr != nil {
+		return aerr
+	}
+	return nil
+}
+
+// qqPassiveWindowGone reports whether err is a definite API rejection (not a
+// network-uncertain or transient 429/5xx failure), which for a passive reply
+// almost always means the msg_id window has closed.
+func qqPassiveWindowGone(err error) bool {
+	var pe *platformError
+	if errors.As(err, &pe) {
+		return !pe.Uncertain && !pe.Retryable
+	}
+	return err != nil
 }

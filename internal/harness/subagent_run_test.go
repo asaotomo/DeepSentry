@@ -3,7 +3,12 @@ package harness
 import (
 	"ai-edr/internal/analyzer"
 	"ai-edr/internal/collector"
+	"ai-edr/internal/config"
 	"ai-edr/internal/harness/subagent"
+	"ai-edr/internal/memory"
+	"ai-edr/internal/skills"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +36,58 @@ func TestSubAgentsShareBoundedCoreClueBoardAcrossRuns(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("consumer sub-agent did not receive producer's core clue")
+	}
+}
+
+func TestSubAgentAutoLoadsSkillForItsAssignment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(path, []byte("# probe-skill\nRun the precise probe workflow."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	parent := &DeepAgent{
+		State: NewAgentState(dir), SessionID: "skill_auto",
+		Catalog: &skills.SkillCatalog{Skills: []skills.SkillMeta{{Name: "probe-skill", Description: "probe workflow", Path: path, AllowImplicit: true}}},
+	}
+	runner := NewSubAgentRunner(parent)
+	seen := false
+	runner.StepFn = func(opts analyzer.StepOptions) (analyzer.AgentResponse, error) {
+		seen = strings.Contains(opts.ExtraPrompt, "Run the precise probe workflow.")
+		return analyzer.AgentResponse{Action: string(ActionFinish), FinalReport: "done"}, nil
+	}
+	_, err := runner.Run(subagent.Spec{Name: "worker", SystemPrompt: "test", MaxSteps: 1}, "【主流程协作简报】\n其他工作\n【你的唯一分工】\n使用 probe-skill 进行检查\n不要替其他子 Agent 扩大范围。", collector.SystemContext{}, false)
+	if err != nil || !seen {
+		t.Fatalf("sub-agent did not auto-load assignment skill: seen=%v err=%v", seen, err)
+	}
+}
+
+func TestSubAgentRemembersInAssignedTargetScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := memory.NewStore(memory.ScopeLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &DeepAgent{State: NewAgentState(t.TempDir()), SessionID: "scoped_memory", MemoryStore: store}
+	runner := NewSubAgentRunner(parent)
+	runner.Target = config.TargetConfig{Name: "host-a", Protocol: "ssh", Host: "host-a"}
+	calls := 0
+	runner.StepFn = func(analyzer.StepOptions) (analyzer.AgentResponse, error) {
+		calls++
+		if calls == 1 {
+			return analyzer.AgentResponse{Action: string(ActionRemember), MemoryKey: "os", MemoryValue: "Windows Server", MemoryScope: "target"}, nil
+		}
+		return analyzer.AgentResponse{Action: string(ActionFinish), FinalReport: "done"}, nil
+	}
+	_, err = runner.Run(subagent.Spec{Name: "worker", SystemPrompt: "test", MaxSteps: 2}, "检查目标系统", collector.SystemContext{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries := store.ActiveEntries(); len(entries) != 0 {
+		t.Fatalf("child memory leaked into parent scope: %#v", entries)
+	}
+	entries := store.ActiveEntriesForScope("ssh:host-a")
+	if len(entries) != 1 || entries[0].Value != "Windows Server" {
+		t.Fatalf("child target memory=%#v", entries)
 	}
 }
 

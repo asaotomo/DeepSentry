@@ -13,13 +13,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestHawkEyeV107ProfileCoversAuthoritativeServerContract(t *testing.T) {
+func TestHawkEyeV1012ProfileCoversAuthoritativeServerContract(t *testing.T) {
 	if got := len(HawkEyeKnownToolNames()); got != 51 {
-		t.Fatalf("HawkEye 1.0.7 profile tool count=%d, want 51", got)
+		t.Fatalf("HawkEye 1.0.12 profile tool count=%d, want 51", got)
 	}
 	sourcePath := ""
 	for _, candidate := range []string{
@@ -39,8 +40,8 @@ func TestHawkEyeV107ProfileCoversAuthoritativeServerContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(raw)
-	if !strings.Contains(source, "const SERVER_VERSION = '1.0.7'") {
-		t.Fatalf("expected HawkEye 1.0.7 server, got %s", sourcePath)
+	if !strings.Contains(source, "const SERVER_VERSION = '1.0.12'") {
+		t.Fatalf("expected HawkEye 1.0.12 server, got %s", sourcePath)
 	}
 	start := strings.Index(source, "const TOOLS = [")
 	if start < 0 {
@@ -69,7 +70,7 @@ func TestHawkEyeV107ProfileCoversAuthoritativeServerContract(t *testing.T) {
 		"hawkeye_capture_inspect", "hawkeye_request_mutate", "hawkeye_script_upsert",
 	} {
 		if !strings.Contains(source, fragment) {
-			t.Fatalf("authoritative HawkEye 1.0.7 contract lost critical field/tool %q", fragment)
+			t.Fatalf("authoritative HawkEye 1.0.12 contract lost critical field/tool %q", fragment)
 		}
 	}
 }
@@ -196,7 +197,7 @@ func TestHawkEyeSnapshotOutputDropsElementDumpAndKeepsHint(t *testing.T) {
 		t.Fatalf("accessibility tree and interaction hint missing: %s", out)
 	}
 	if !strings.Contains(out, "next_page_token=tokContinuePage01") || strings.Contains(out, "next_cursor=") {
-		t.Fatalf("1.0.7 page token summary missing: %s", out)
+		t.Fatalf("1.0.12 page token summary missing: %s", out)
 	}
 	click := formatHawkEyeMCPContent("browser_click", []sdkmcp.Content{
 		&sdkmcp.TextContent{Text: "clicked"},
@@ -339,5 +340,28 @@ func TestHawkEyePortFromArgs(t *testing.T) {
 	}
 	if got := hawkEyePortFromArgs([]string{"--ws-port=19020"}); got != 19020 {
 		t.Fatalf("ws-port=%d", got)
+	}
+}
+
+func TestHawkEyeLongUnicodeOutputKeepsContinuationAndInputEvidence(t *testing.T) {
+	payload := map[string]any{"inputDispatched": true, "outcomeVerified": false,
+		"category": "input_verification_failed", "context": map[string]any{"complete": false, "next_page_token": "opaque-token-205"}}
+	out := formatHawkEyeMCPContent("browser_click", []sdkmcp.Content{&sdkmcp.TextContent{Text: strings.Repeat("中文内容", 10000)}}, payload, nil)
+	if !utf8.ValidString(out) {
+		t.Fatal("truncated UTF-8")
+	}
+	for _, want := range []string{"opaque-token-205", "inputDispatched=true", "outcomeVerified=false", "input_verification_failed", "不要直接重复"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("lost %q in compact output", want)
+		}
+	}
+}
+
+func TestHawkEyePreservesNativeInputMode(t *testing.T) {
+	for tool, key := range map[string]string{"browser_click": "clickMode", "browser_press_key": "inputMode"} {
+		got := applyHawkEyeCallDefaults(tool, map[string]string{key: "native", "key": "f"})
+		if got[key] != "native" {
+			t.Fatalf("%s changed native mode: %v", tool, got)
+		}
 	}
 }

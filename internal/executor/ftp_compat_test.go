@@ -204,8 +204,19 @@ func TestFTPRejectsCommandInjectionAndExplicitlyReportsReadLimit(t *testing.T) {
 	if err != nil || len(args) != 3 || args[1] != "/archive/evidence one.bin" || args[2] != `C:\evidence files\one.bin` {
 		t.Fatalf("quoted args=%#v err=%v", args, err)
 	}
+	args, err = splitFTPCommandLine(`download "\\server\share\one.bin" "C:\Temp\"`)
+	if err != nil || len(args) != 3 || args[1] != `\\server\share\one.bin` || args[2] != `C:\Temp\` {
+		t.Fatalf("Windows UNC or trailing separator changed: args=%#v err=%v", args, err)
+	}
+	args, err = splitFTPCommandLine(`download '/remote/O'\''Brien report.txt' 'C:\Users\O'\''Brien\report.txt'`)
+	if err != nil || len(args) != 3 || args[1] != `/remote/O'Brien report.txt` || args[2] != `C:\Users\O'Brien\report.txt` {
+		t.Fatalf("apostrophe in transfer path changed: args=%#v err=%v", args, err)
+	}
 	if _, err := splitFTPCommandLine(`download "unterminated`); err == nil {
 		t.Fatal("unterminated quoted path accepted")
+	}
+	if _, err := (&FTPExecutor{}).Run(`download "" "/tmp/report.txt"`); err == nil {
+		t.Fatal("empty FTP transfer path accepted")
 	}
 	left, right := net.Pipe()
 	go func() {

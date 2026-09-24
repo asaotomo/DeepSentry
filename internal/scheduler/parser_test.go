@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,7 +14,10 @@ func TestPlanTaskParsesTomorrowInspectionDingTalk(t *testing.T) {
 	}
 	now := time.Date(2026, 6, 26, 15, 30, 0, 0, loc)
 	plan, err := PlanTask(PlanInput{
-		Text:     "明天9点帮我巡检服务器并生成巡检报告发钉钉通知给我",
+		Prompt:   "巡检服务器并生成巡检报告",
+		RunAt:    "明天9点",
+		Kind:     KindInspection,
+		Notify:   NotifyDingTalk,
 		Timezone: "Asia/Shanghai",
 	}, now)
 	if err != nil {
@@ -41,7 +45,9 @@ func TestPlanTaskParsesMultiChannelNotify(t *testing.T) {
 	}
 	now := time.Date(2026, 6, 26, 15, 30, 0, 0, loc)
 	plan, err := PlanTask(PlanInput{
-		Text:     "明天9点巡检服务器并生成报告，同时发钉钉、飞书和邮件通知",
+		Prompt:   "巡检服务器并生成报告",
+		RunAt:    "明天9点",
+		Notify:   "dingtalk,feishu,email",
 		Timezone: "Asia/Shanghai",
 	}, now)
 	if err != nil {
@@ -66,7 +72,7 @@ func TestNormalizeNotifyAliases(t *testing.T) {
 func TestPlanTaskParsesRelativeTime(t *testing.T) {
 	loc := time.FixedZone("test", 8*3600)
 	now := time.Date(2026, 6, 26, 15, 0, 0, 0, loc)
-	plan, err := PlanTask(PlanInput{Text: "10分钟后巡检", Timezone: "Local"}, now)
+	plan, err := PlanTask(PlanInput{RunAt: "10分钟后", Timezone: "Local"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,33 +81,17 @@ func TestPlanTaskParsesRelativeTime(t *testing.T) {
 	}
 }
 
-func TestLooksLikeScheduleIntent(t *testing.T) {
-	positives := []string{
+func TestTaskSentenceDoesNotBecomeASchedule(t *testing.T) {
+	now := time.Date(2026, 6, 26, 15, 30, 0, 0, time.Local)
+	for _, input := range []string{
 		"明天9点帮我巡检服务器并生成报告发钉钉通知",
-		"每天上午9点巡检生产服务器",
+		"每分钟在当前聊天框发一句 hello",
 		"10分钟后提醒我检查备份",
-		"创建定时任务：2026-08-01 09:30 生成报告",
-	}
-	for _, input := range positives {
-		if ok, reason := DetectScheduleIntent(input); !ok {
-			t.Errorf("expected schedule intent for %q, reason=%s", input, reason)
-		}
-	}
-
-	negatives := []string{
-		"检查 crontab 计划任务后门",
 		"攻击者似乎篡改了系统命令，导致该命令一旦运行就会执行恶意回连的动作。提交回连的IP和端口，例如：1.1.1.1:1111",
-		"**Q10：持久化项文件 md5（重启执行后门）**\n**答案**\n62aba584ae744fcb6ff4a9ffbc848041\n文件：/etc/systemd/system/syntime.service",
-		"明天9点执行结果如下",
-		"报告中说今天10:30运行过检查",
-		"脚本每天9点会执行备份",
-		"10分钟后执行结果显示检查成功",
-		"[10:30:01] 执行检查失败 HTTP/1.1 500",
-		"Q10：执行文件是什么？",
-	}
-	for _, input := range negatives {
-		if ok, reason := DetectScheduleIntent(input); ok {
-			t.Errorf("false positive schedule intent for %q, reason=%s", input, reason)
+	} {
+		_, err := PlanTask(PlanInput{Text: input}, now)
+		if err == nil || !strings.Contains(err.Error(), "不会从任务正文猜测执行时间") {
+			t.Fatalf("%q err=%v", input, err)
 		}
 	}
 }
@@ -124,19 +114,20 @@ func TestPlanTaskDoesNotParseIPPortAsClock(t *testing.T) {
 	}
 	now := time.Date(2026, 7, 2, 17, 25, 0, 0, loc)
 	_, err = PlanTask(PlanInput{
-		Text:     "攻击者似乎篡改了系统命令，导致该命令一旦运行就会执行恶意回连的动作。提交回连的IP和端口，例如：1.1.1.1:1111",
+		Prompt:   "攻击者似乎篡改了系统命令，导致该命令一旦运行就会执行恶意回连的动作。提交回连的IP和端口，例如：1.1.1.1:1111",
+		RunAt:    "2099-01-01 09:00",
 		Timezone: "Asia/Shanghai",
 	}, now)
-	if err == nil {
-		t.Fatal("expected IP:port prompt to fail time parsing")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestPlanTaskRejectsPastExplicitDateAndInvalidCalendarDate(t *testing.T) {
 	loc := time.FixedZone("test", 8*3600)
 	now := time.Date(2026, 7, 17, 15, 0, 0, 0, loc)
-	for _, input := range []string{"今天9点帮我巡检服务器", "2026-02-30 09:00 帮我检查服务器"} {
-		if _, err := PlanTask(PlanInput{Text: input, Timezone: "Asia/Shanghai"}, now); err == nil {
+	for _, input := range []string{"今天9点", "2026-02-30 09:00"} {
+		if _, err := PlanTask(PlanInput{RunAt: input, Timezone: "Asia/Shanghai"}, now); err == nil {
 			t.Errorf("expected invalid schedule to fail: %q", input)
 		}
 	}
@@ -189,5 +180,45 @@ func TestStoreAddUniquePreventsEquivalentDuplicates(t *testing.T) {
 	tasks, err := store.Load()
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("stored tasks=%#v err=%v", tasks, err)
+	}
+}
+
+func TestPlanEveryMinuteWithoutClock(t *testing.T) {
+	now := time.Date(2026, 9, 22, 9, 28, 0, 0, time.Local)
+	text := "每分钟在桌面创建一个记事本文件并写入一个笑话"
+	plan, err := PlanTask(PlanInput{Text: text, Repeat: "每分钟"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Task.Repeat != RepeatInterval || plan.Task.IntervalSec != 60 {
+		t.Fatalf("repeat=%s interval=%d", plan.Task.Repeat, plan.Task.IntervalSec)
+	}
+	if !plan.Task.RunAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("run_at=%s", plan.Task.RunAt)
+	}
+	bare, err := PlanTask(PlanInput{Text: text}, now)
+	if err == nil || !strings.Contains(err.Error(), "不会从任务正文猜测执行时间") {
+		t.Fatalf("task sentence was still parsed: %+v %v", bare.Task, err)
+	}
+}
+
+func TestStructuredIntervalIgnoresClockInsideTask(t *testing.T) {
+	now := time.Date(2026, 9, 22, 9, 28, 0, 0, time.Local)
+	plan, err := PlanTask(PlanInput{
+		Prompt:      "写入笑话，文件名 joke-2026-09-22-09:00.txt",
+		IntervalSec: "60",
+		Repeat:      "interval",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Task.RunAt.Equal(now.Add(time.Minute)) || plan.Task.IntervalSec != 60 {
+		t.Fatalf("structured interval used the prose clock: %+v", plan.Task)
+	}
+	if _, err := ParseIntervalSpec("30"); err == nil {
+		t.Fatal("30 seconds must be rejected")
+	}
+	if sec, err := ParseIntervalSpec("每小时"); err != nil || sec != 3600 {
+		t.Fatalf("每小时=%d %v", sec, err)
 	}
 }

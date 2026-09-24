@@ -231,49 +231,10 @@ func ftpTimeout(seconds int, fallback time.Duration) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// splitFTPCommandLine supports quoted local/remote paths without invoking a
-// shell. Backslashes remain literal for Windows paths unless they escape the
-// active quote character or another backslash inside double quotes.
+// FTP transfer pseudo-commands use the same quoting as local and SSH
+// transfers. In particular, shellQuote emits '\” for apostrophes in paths.
 func splitFTPCommandLine(command string) ([]string, error) {
-	var args []string
-	var current strings.Builder
-	var quote rune
-	runes := []rune(strings.TrimSpace(command))
-	flush := func() {
-		if current.Len() > 0 {
-			args = append(args, current.String())
-			current.Reset()
-		}
-	}
-	for index := 0; index < len(runes); index++ {
-		r := runes[index]
-		if quote == 0 {
-			switch r {
-			case '\'', '"':
-				quote = r
-			case ' ', '\t':
-				flush()
-			default:
-				current.WriteRune(r)
-			}
-			continue
-		}
-		if r == quote {
-			quote = 0
-			continue
-		}
-		if quote == '"' && r == '\\' && index+1 < len(runes) && (runes[index+1] == '"' || runes[index+1] == '\\') {
-			index++
-			current.WriteRune(runes[index])
-			continue
-		}
-		current.WriteRune(r)
-	}
-	if quote != 0 {
-		return nil, fmt.Errorf("FTP 命令路径引号未闭合")
-	}
-	flush()
-	return args, nil
+	return splitShellFields(command)
 }
 
 func (f *FTPExecutor) Run(cmd string) (string, error) {
@@ -294,12 +255,12 @@ func (f *FTPExecutor) Run(cmd string) (string, error) {
 	}
 	switch parts[0] {
 	case "download":
-		if len(parts) != 3 {
+		if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
 			return "", fmt.Errorf("用法: download <远程文件> <本地路径>")
 		}
 		return f.downloadFile(parts[1], parts[2])
 	case "upload":
-		if len(parts) != 3 {
+		if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
 			return "", fmt.Errorf("用法: upload <本地文件> <远程路径>")
 		}
 		return f.uploadFile(parts[1], parts[2])

@@ -108,13 +108,15 @@ type Config struct {
 	// --- Model capability / context adaptation ---
 	// Zero values use conservative auto-detection. Local runtimes should set
 	// context_window_tokens to their actual num_ctx/max_model_len for best use.
-	ModelProfile         string  `mapstructure:"model_profile"` // auto|compact|balanced|full
-	ModelParameterB      float64 `mapstructure:"model_parameter_b"`
-	ContextWindowTokens  int     `mapstructure:"context_window_tokens"`
-	ContextUtilization   float64 `mapstructure:"context_utilization"`
-	ReservedOutputTokens int     `mapstructure:"reserved_output_tokens"`
-	NativeToolLimit      int     `mapstructure:"native_tool_limit"`
-	VisionMode           string  `mapstructure:"vision_mode"` // auto|enabled|disabled
+	ModelProfile              string  `mapstructure:"model_profile"` // auto|compact|balanced|full
+	ModelParameterB           float64 `mapstructure:"model_parameter_b"`
+	ContextWindowTokens       int     `mapstructure:"context_window_tokens"`
+	LocalContextDiscovered    bool    `mapstructure:"-" json:"-" yaml:"-"`
+	LocalNativeToolsAvailable bool    `mapstructure:"-" json:"-" yaml:"-"`
+	ContextUtilization        float64 `mapstructure:"context_utilization"`
+	ReservedOutputTokens      int     `mapstructure:"reserved_output_tokens"`
+	NativeToolLimit           int     `mapstructure:"native_tool_limit"`
+	VisionMode                string  `mapstructure:"vision_mode"` // auto|enabled|disabled
 
 	// Runtime v3 is additive and can be rolled back to legacy without changing
 	// model or target configuration.

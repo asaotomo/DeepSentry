@@ -89,4 +89,6 @@ func isUnsafeFormatRune(r rune) bool {
 }
 
 // Only applied to non-paste key events: copied code remains unchanged.
-var leakedMouseReport = regexp.MustCompile(`(?:\x1b)?\[<\d{1,3};\d{1,6};\d{1,6}[Mm]`)
+// The bracket is optional because Windows consoles sometimes consume ESC[
+// and leave the SGR payload (<35;x;yM) as ordinary keystrokes.
+var leakedMouseReport = regexp.MustCompile(`(?:\x1b)?\[?<\d{1,3};\d{1,6};\d{1,6}[Mm]`)

@@ -49,6 +49,25 @@ func TestRedactSensitiveTextUsesPatternsAndConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestRedactSensitiveTextFastPathStillCoversCredentialForms(t *testing.T) {
+	plain := strings.Repeat("observed service status and log evidence ", 20)
+	if got := RedactSensitiveText(plain); got != plain {
+		t.Fatalf("ordinary output changed: %q", got)
+	}
+	for _, input := range []string{
+		"--token abcdefghijklmnop",
+		"api_key=abcdefghijk",
+		"Authorization: Bearer abcdefghijklmnop",
+		"sshpass -p abcdefghijk",
+		"https://user:abcdefghijk@example.test/path",
+		"-----BEGIN PRIVATE KEY-----secret-material-----END PRIVATE KEY-----",
+	} {
+		if got := RedactSensitiveText(input); got == input {
+			t.Fatalf("credential form was not redacted: %q", input)
+		}
+	}
+}
+
 func TestRedactJSONPreservesSyntaxAndRedactsSensitiveKeys(t *testing.T) {
 	raw, err := RedactJSON(map[string]any{
 		"authorization": "Bearer abcdefghijklmnop",

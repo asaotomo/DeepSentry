@@ -50,9 +50,9 @@ func TestNetworkPagerAdvance(t *testing.T) {
 	}
 }
 
-func TestNormalizeRemoteCommandDecodesUnicodeEscapes(t *testing.T) {
+func TestNormalizeRemoteCommandPreservesLiteralUnicodeEscapes(t *testing.T) {
 	got := normalizeRemoteCommand(`chmod +x /tmp/a.sh \u0026\u0026 ls -la /tmp/a.sh`)
-	if got != "chmod +x /tmp/a.sh && ls -la /tmp/a.sh" {
+	if got != `chmod +x /tmp/a.sh \u0026\u0026 ls -la /tmp/a.sh` {
 		t.Fatalf("unexpected command: %q", got)
 	}
 }

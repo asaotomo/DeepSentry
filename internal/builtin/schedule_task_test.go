@@ -20,7 +20,10 @@ func TestScheduleTaskPlan(t *testing.T) {
 
 	out, err := ScheduleTask(NewRuntime("linux", false), map[string]string{
 		"action": "plan",
-		"text":   "明天9点巡检服务器并生成报告发钉钉通知",
+		"task":   "巡检服务器并生成报告",
+		"run_at": "明天9点",
+		"kind":   "inspection",
+		"notify": "dingtalk",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +73,8 @@ func TestScheduleTaskRejectsAgentCreateWithoutUnattendedConfirmation(t *testing.
 
 	_, err := ScheduleTask(NewRuntime("linux", false), map[string]string{
 		"action":         "add",
-		"text":           "明天9点整理今天的日志并总结异常",
+		"text":           "整理今天的日志并总结异常",
+		"run_at":         "2099-01-01 09:00",
 		"kind":           "agent",
 		"allow_batch":    "true",
 		"confirm_create": "true",
@@ -92,7 +96,8 @@ func TestScheduleTaskAllowsInspectionCreate(t *testing.T) {
 
 	out, err := ScheduleTask(NewRuntime("linux", false), map[string]string{
 		"action":         "add",
-		"text":           "明天9点巡检服务器并生成报告",
+		"text":           "巡检服务器并生成报告",
+		"run_at":         "2099-01-01 09:00",
 		"kind":           "inspection",
 		"confirm_create": "true",
 	})
@@ -100,6 +105,32 @@ func TestScheduleTaskAllowsInspectionCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "已写入定时任务") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestScheduleTaskChatReplyDoesNotNeedUnattendedAgent(t *testing.T) {
+	oldStore := config.GlobalConfig.SchedulerStore
+	oldTZ := config.GlobalConfig.SchedulerTimezone
+	config.GlobalConfig.SchedulerStore = t.TempDir() + "/tasks.json"
+	config.GlobalConfig.SchedulerTimezone = "Asia/Shanghai"
+	defer func() {
+		config.GlobalConfig.SchedulerStore = oldStore
+		config.GlobalConfig.SchedulerTimezone = oldTZ
+	}()
+
+	out, err := ScheduleTask(NewRuntime("linux", false), map[string]string{
+		"action":         "add",
+		"task":           "每1分钟在当前聊天框发一句 hello world",
+		"interval_sec":   "60",
+		"repeat":         "interval",
+		"reply_text":     "hello world",
+		"confirm_create": "true",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "已写入定时任务") || !strings.Contains(out, "hello world") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 }

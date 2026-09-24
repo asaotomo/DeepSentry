@@ -121,3 +121,125 @@ func TestMarkdownFenceSurvivesEmbeddedCodeFence(t *testing.T) {
 		t.Fatalf("fence=%q", got)
 	}
 }
+
+func TestEvidenceJournalArchivesDialogueAndCompleteRedactedOutput(t *testing.T) {
+	tmp := t.TempDir()
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	old := config.GlobalConfig
+	config.GlobalConfig.ApiKey = "evidence-secret-123"
+	t.Cleanup(func() { config.GlobalConfig = old })
+	reporter, reportPath, err := NewReporterWithTitle("检查登录日志")
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := []analyzer.Message{{Role: "user", Content: "检查登录日志"}, {Role: "user", Content: "检查登录日志"}, {Role: "user", Content: "Output: synthetic", Synthetic: true}}
+	if err := reporter.RecordUserHistory(&history); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.RecordUserHistory(&history); err != nil {
+		t.Fatal(err)
+	}
+	fullOutput := strings.Repeat("证据行\n", 500) + "api_key: evidence-secret-123"
+	if _, err := reporter.RecordEvidence(EvidenceRecord{Kind: "action", Step: 2, Action: "execute", Status: "success", Input: "journalctl -n 100", Output: fullOutput, Risk: "low", Approval: "auto"}); err != nil {
+		t.Fatal(err)
+	}
+	reporter.Close()
+	count, finalHash, err := VerifyEvidenceJournal(reporter.EvidencePath())
+	if err != nil || count != 3 || finalHash == "" {
+		t.Fatalf("verify count=%d hash=%q err=%v", count, finalHash, err)
+	}
+	raw, err := os.ReadFile(reporter.EvidencePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "evidence-secret-123") || !strings.Contains(string(raw), strings.Repeat("证据行\\n", 500)) {
+		t.Fatalf("archive lost output or leaked secret: %s", raw)
+	}
+	report, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(report), "E-000003") || !strings.Contains(string(report), finalHash) || strings.Contains(string(report), "evidence-secret-123") {
+		t.Fatalf("report missing reference/anchor or leaked secret: %s", report)
+	}
+	if !strings.Contains(string(report), "风险与溯源") || !strings.Contains(string(report), "用户原话 2 条") {
+		t.Fatalf("report missing risk summary: %s", report)
+	}
+}
+
+func TestSessionOutcomeStaysDistinctFromFinalReport(t *testing.T) {
+	tmp := t.TempDir()
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	reporter, reportPath, err := NewReporter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.RecordSessionOutcome("cancelled", "cancelled_before_step", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.LogFinal("这是结论"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.RecordSessionOutcome("failed", "should_not_append", ""); err != nil {
+		t.Fatal(err)
+	}
+	reporter.Close()
+	raw, err := os.ReadFile(reporter.EvidencePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(raw), "session_outcome") != 1 || !strings.Contains(string(raw), "final_report") {
+		t.Fatalf("outcome journal=%s", raw)
+	}
+	report, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(report), "不能把中断前的中间结果当成最终结论") || !strings.Contains(string(report), "## 最终结论") || strings.Contains(string(report), "should_not_append") {
+		t.Fatalf("report=%s", report)
+	}
+}
+
+func TestEvidenceJournalDetectsTampering(t *testing.T) {
+	tmp := t.TempDir()
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	reporter, _, err := NewReporter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reporter.RecordEvidence(EvidenceRecord{Kind: "action", Action: "read_file", Output: "safe evidence"}); err != nil {
+		t.Fatal(err)
+	}
+	reporter.Close()
+	path := reporter.EvidencePath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(raw), "safe evidence", "fake evidence", 1)
+	if err := os.WriteFile(path, []byte(tampered), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := VerifyEvidenceJournal(path); err == nil {
+		t.Fatal("modified evidence passed verification")
+	}
+}
+
+func TestNilReporterSetTitle(t *testing.T) {
+	var r *Reporter
+	if err := r.SetTitle("title"); err != nil {
+		t.Fatal(err)
+	}
+}

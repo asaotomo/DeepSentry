@@ -20,7 +20,7 @@ mcp_server_configs:
     required: false
 ```
 
-推荐使用本仓库随附的 HawkEye MCP Server **1.0.7**（`hawkeye-mcp-server.mjs`）。`--profile full` 暴露全部 51 个工具；`core` / `research` / `security` 会按能力裁剪，DeepSentry 只适配当前会话实际出现的工具。
+推荐使用本仓库随附的 HawkEye MCP Server **1.0.12**（`hawkeye-mcp-server.mjs`）。`--profile full` 暴露全部 51 个工具；`core` / `research` / `security` 会按能力裁剪，DeepSentry 只适配当前会话实际出现的工具。
 
 `tool_timeout_sec: 0` 或省略时，DeepSentry 客户端超时略高于 Server：`browser_research` 205 秒（Server 190），Search / Fetch / Captcha / Fuzz 130 秒（Server 120），快照/导航/截图等 100 秒（Server 90），其余使用通用 60 秒。显式配置的超时值永远优先；如果需要 Research，不建议显式设得低于 205 秒。扩展弹窗需打开 “HawkEye Browser Automation MCP”，VIP/Pro 才能桥接。
 
@@ -41,7 +41,7 @@ stdio 由 DeepSentry **自己拉起** 时，HawkEye MCP 进程归该二进制所
 
 Server 进程或本地桥重启后，可执行 `/mcp reconnect hawkeye` 原地重建会话并重新发现全部能力。DeepSentry 不会自动重放断线前的工具调用，因为修改型操作可能已经在浏览器端生效但响应丢失。
 
-## 2. DeepSentry 识别的 HawkEye 1.0.7 能力面
+## 2. DeepSentry 识别的 HawkEye 1.0.12 能力面
 
 | 能力链 | HawkEye MCP 工具 |
 | --- | --- |
@@ -68,7 +68,7 @@ Server 进程或本地桥重启后，可执行 `/mcp reconnect hawkeye` 原地�
 5. 下拉/清晰度用 `browser_select_option`，`value` 传可见项（如 `1080P`）。B 站倍速不要点菜单。
 6. `browser_snapshot diff=true` 验证结果。不要对同一页并行连点。
 
-大页面优先 `browser_find` / `browser_read_text`。当 `complete=false` 时，把 `context.next_page_token` **单独**作为 `page_token` 再调同一工具。1.0.7 **拒绝数字 `cursor`**，也不允许翻页时夹带 `url` / `query` / `max_elements`。DeepSentry 会自动把 `next_page_token` 收成只含 `page_token` 的续读调用，并丢掉 snapshot/click 返回里的巨大 `elements` JSON。
+大页面优先 `browser_find` / `browser_read_text`。当 `complete=false` 时，把 `context.next_page_token` **单独**作为 `page_token` 再调同一工具。1.0.12 **拒绝数字 `cursor`**，也不允许翻页时夹带 `url` / `query` / `max_elements`。DeepSentry 会自动把 `next_page_token` 收成只含 `page_token` 的续读调用，并丢掉 snapshot/click 返回里的巨大 `elements` JSON。
 
 公开检索必须带搜索运算符（`"精确短语"`、`site:`、`filetype:`、`intitle:`、`-排除`、`2020..2025`），不要只丢关键词。内网/实验环境自签证书 `browser_navigate` 会自动绕过拦截页；公网证书告警用 `browser_security` 看结构化 TLS 证据，不要靠截图判断。
 
@@ -161,5 +161,14 @@ DeepSentry 不再把所有 HawkEye MCP 调用粗暴当成同一级风险：
 | Research / Fetch 稳定在 60 秒断开 | 删除过低的显式 `tool_timeout_sec`，使用 0/省略让 DeepSentry 自动适配 |
 | 只看到请求行 | 用 `hawkeye_request_get` 显式请求 `request_headers` / `request_body`；GET 的空 body 本身正常 |
 | 大页面结果不全 | 检查 `structuredContent.context.complete/next_page_token`，只传 `page_token` 续读 |
-| 报 `Numeric continuation cursors` | 1.0.7 不再接受数字 `cursor`；改用上一轮返回的 `next_page_token` |
+| 报 `Numeric continuation cursors` | 1.0.12 不再接受数字 `cursor`；改用上一轮返回的 `next_page_token` |
 | 验证码被刷新或 evaluate 失败 | 用 `browser_captcha_assist` analyze → solve，不要点图片、不要 `hawkeye_evaluate` 像素 |
+
+
+### 2.0.5 / MCP 1.0.12 更新
+
+Chrome 和 Firefox 使用同一个随附服务端，可通过 MCP 配置的环境变量 `HX0_MCP_BROWSER=chrome` 或 `firefox` 固定浏览器。不指定时首个就绪浏览器保持活动，其余待命。
+
+`clickMode` / `inputMode` 支持 `native`。`inputDispatched=true` 仅表示输入已发送；`outcomeVerified=false` 或 `input_verification_failed` 时必须先读取页面状态，不可直接重试。导航只返回有限预览，需要交互引用时重新 snapshot。DeepSentry 保留这些字段及长文本分页令牌。
+
+Windows 传统控制台自动使用兼容配色。可用 `set DEEPSENTRY_LEGACY_CONSOLE=1` 强制启用，再启动程序；`--theme light` 可选亮色主题。无 ANSI VT 支持时自动转普通 CLI。当前 Go 工具链最低支持 Windows 10 / Server 2016（https://go.dev/wiki/MinimumRequirements），Windows 7/8 需要另行移植运行时和依赖。

@@ -21,6 +21,36 @@ func TestCountUserTurns(t *testing.T) {
 	}
 }
 
+func TestSyntheticFeedbackDoesNotBecomeUserFollowUp(t *testing.T) {
+	history := []analyzer.Message{
+		{Role: "user", Content: "需求：排查这台主机"},
+		{Role: "user", Content: "Output:\nresult", Synthetic: true},
+		{Role: "user", Content: "子 Agent [log-analyst] 从 checkpoint 恢复后的结果：\n已完成", Synthetic: true},
+		{Role: "user", Content: "子 Agent [network-analyst] 从 checkpoint 恢复后的结果：\n旧版快照"},
+		{Role: "user", Content: "MCP 工具返回了图片证据，请分析", Synthetic: true},
+		{Role: "user", Content: "循环守卫：请换方案", Synthetic: true},
+	}
+	if got := CountUserTurns(history); got != 1 {
+		t.Fatalf("synthetic messages inflated user turns: %d", got)
+	}
+	if got := ChatReplyExtraPrompt(true, &history); strings.Contains(got, "【续聊】") {
+		t.Fatalf("synthetic feedback triggered follow-up prompt: %q", got)
+	}
+	if got := latestUserTask(history); got != "需求：排查这台主机" {
+		t.Fatalf("skill matching used synthetic feedback: %q", got)
+	}
+	goal, latest := collaborationUserDirectives(history)
+	if goal != "需求：排查这台主机" || latest != goal {
+		t.Fatalf("sub-agent brief used synthetic feedback: goal=%q latest=%q", goal, latest)
+	}
+	if !canContinueSavedSubAgents(append(history, analyzer.Message{Role: "user", Content: "需求：继续"}), 1) {
+		t.Fatal("synthetic feedback blocked an explicit continue")
+	}
+	if canContinueSavedSubAgents(append(history, analyzer.Message{Role: "user", Content: "需求：查另一台"}), 1) {
+		t.Fatal("new user task was mistaken for continue")
+	}
+}
+
 func TestCommitFinishDoesNotCreateSyntheticUserTurn(t *testing.T) {
 	h := []analyzer.Message{{Role: "user", Content: "真实需求"}}
 	CommitFinishToHistory(&h, AgentAction{Type: ActionFinish, FinalReport: "完成"}, "完成")

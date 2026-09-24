@@ -34,8 +34,23 @@ func (s *ChannelSink) Emit(e harness.UIEvent) {
 	}
 	s.mu.Unlock()
 
-	noisy := e.Kind == harness.EventStreamDelta || e.Kind == harness.EventCommandOutput
-	if noisy {
+	if e.Kind == harness.EventStreamDelta {
+		// The final stream_end event carries the full response. Never hold up
+		// the model's network reader for a preview chunk the UI cannot keep up
+		// with; a full queue could otherwise add 50ms per token chunk.
+		select {
+		case s.events <- e:
+			return
+		default:
+			s.mu.Lock()
+			if !s.closed {
+				s.droppedStream++
+			}
+			s.mu.Unlock()
+			return
+		}
+	}
+	if e.Kind == harness.EventCommandOutput {
 		select {
 		case s.events <- e:
 			return

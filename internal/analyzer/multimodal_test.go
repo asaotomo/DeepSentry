@@ -145,3 +145,37 @@ func TestVisionRoutingSkipsTextOnlyModelAndUsesVisionFallback(t *testing.T) {
 		t.Fatalf("text-only model received an image request %d times", textHits.Load())
 	}
 }
+
+func TestLocalVisualModelWithNonVisualNameSendsImageWhenEnabled(t *testing.T) {
+	original := config.GlobalConfig
+	t.Cleanup(func() { config.GlobalConfig = original })
+	var received atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		messages, ok := raw["messages"].([]interface{})
+		if !ok || len(messages) == 0 {
+			t.Errorf("missing messages: %#v", raw)
+			return
+		}
+		content, ok := messages[0].(map[string]interface{})["content"].([]interface{})
+		if !ok || len(content) < 2 || content[1].(map[string]interface{})["type"] != "image_url" {
+			t.Errorf("image was not sent: %#v", messages)
+			return
+		}
+		received.Store(true)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"image-ok"}}]}`))
+	}))
+	defer server.Close()
+	config.GlobalConfig = config.Config{
+		Provider: "ollama", APIProtocol: "openai_chat", ApiURL: server.URL,
+		ApiKey: "none", ModelName: "gemma4:latest", VisionMode: "enabled",
+	}
+	result, err := CallLLMWithRetryContext(context.Background(), []Message{imageMessage(t)}, false, nil)
+	if err != nil || result.Content != "image-ok" || !received.Load() {
+		t.Fatalf("local visual model result=%#v received=%v err=%v", result, received.Load(), err)
+	}
+}

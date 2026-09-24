@@ -108,6 +108,7 @@ func (s *Service) sendOutboundFile(ctx context.Context, c config.ChatChannel, m 
 }
 
 func (s *Service) sendWeixinFile(ctx context.Context, c config.ChatChannel, m Message, plain []byte, name string) error {
+	m = s.latestReplyContext(c, m)
 	if m.ContextToken == "" {
 		return errors.New("缺少微信回复上下文，请用户重新发消息")
 	}

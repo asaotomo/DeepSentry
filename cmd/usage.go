@@ -23,6 +23,7 @@ DeepSentry — AI 安全应急 Agent
   deepsentry --webshell --task "读取最近登录日志"
   deepsentry --batch -y "自动巡检目标机 /proc"
   deepsentry --scheduler -c config.yaml       # 仅运行定时任务调度器
+  # TUI 内 /schedule 查看、修改、取消、重置、删除已建立的定时任务
   deepsentry --resume session_abc123
   deepsentry --session session_chat_demo --task "继续排查"
   deepsentry --list-sessions
@@ -55,6 +56,7 @@ DeepSentry — AI 安全应急 Agent
   -reply-final      仅输出最终任务结论（供聊天机器人回复）
   -webshell         WebShell/非 TTY 友好模式（提交后台执行，立即返回报告/进度路径）
   --no-color        禁用彩色输出（默认启用颜色）
+  --computer-check  检查本机 Computer Use 驱动、权限与桌面状态，不发送输入
   --theme string    TUI 主题：auto（默认）| dark | light
   -chat             运行聊天机器人控制服务
   -chat-setup-cli   终端选平台、扫码/输入凭据、状态/连接检查和解绑

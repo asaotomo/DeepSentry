@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/gorilla/websocket"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -176,6 +177,82 @@ func TestWeixinReceiveCursorAndReplyContext(t *testing.T) {
 		t.Fatal(msg)
 	}
 	s.Disconnect(c.Name)
+}
+func TestWeixinReplyUsesLatestContextToken(t *testing.T) {
+	s := testService(t, nilRunner)
+	sent := make(chan map[string]any, 1)
+	s.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "sendmessage") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			sent <- body
+			return jsonResponse(map[string]int{"ret": 0}), nil
+		}
+		return nil, errors.New("unexpected request")
+	})}
+	c := config.ChatChannel{Name: "wechat-quick", Platform: "weixin", AppID: "bot", AppSecret: "secret", AllowedUsers: []string{"alice"}, APIURL: weixinBase}
+	m := Message{ID: "m2", User: "alice", Chat: "alice", ContextToken: "stale"}
+	s.mu.Lock()
+	s.replyContext[owner(c, m)] = Message{ContextToken: "fresh"}
+	s.mu.Unlock()
+	if err := s.sendWeixin(context.Background(), c, m, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	body := <-sent
+	msg := body["msg"].(map[string]any)
+	if msg["context_token"] != "fresh" {
+		t.Fatalf("stale reply token used: %v", msg)
+	}
+}
+func TestQQExpiredPassiveWindowFallsBackToActive(t *testing.T) {
+	s := testService(t, nilRunner)
+	passive := make(chan bool, 4)
+	s.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/app/getAppAccessToken":
+			return jsonResponse(map[string]string{"access_token": "access"}), nil
+		case "/v2/users/alice/messages":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_, hasID := body["msg_id"]
+			passive <- hasID
+			if hasID {
+				return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"code":22009}`)), Header: make(http.Header)}, nil
+			}
+			return jsonResponse(map[string]string{"id": "sent"}), nil
+		}
+		return nil, errors.New("unexpected request")
+	})}
+	c := config.ChatChannel{Name: "qq-quick", Platform: "qqbot", AppID: "bot", AppSecret: "secret", AllowedUsers: []string{"alice"}}
+	m := Message{ID: "m1", User: "alice", Chat: "alice"}
+	if err := s.sendQQ(context.Background(), c, m, "任务已完成"); err != nil {
+		t.Fatalf("active fallback should recover: %v", err)
+	}
+	if got := <-passive; !got {
+		t.Fatal("first attempt should be a passive reply")
+	}
+	if got := <-passive; got {
+		t.Fatal("fallback should drop msg_id for an active push")
+	}
+}
+func TestQQUncertainReplyDoesNotDuplicate(t *testing.T) {
+	s := testService(t, nilRunner)
+	var calls int
+	s.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/app/getAppAccessToken" {
+			return jsonResponse(map[string]string{"access_token": "access"}), nil
+		}
+		calls++
+		return nil, errors.New("connection reset")
+	})}
+	c := config.ChatChannel{Name: "qq-quick", Platform: "qqbot", AppID: "bot", AppSecret: "secret", AllowedUsers: []string{"alice"}}
+	m := Message{ID: "m1", User: "alice", Chat: "alice"}
+	if err := s.sendQQ(context.Background(), c, m, "任务已完成"); err == nil {
+		t.Fatal("network-uncertain send should surface an error")
+	}
+	if calls != 1 {
+		t.Fatalf("uncertain failure must not resend, calls=%d", calls)
+	}
 }
 func TestPlatformBusinessErrorsAndRedirects(t *testing.T) {
 	s := testService(t, nilRunner)

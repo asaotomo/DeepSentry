@@ -214,8 +214,18 @@ func replaceMemoryFile(src, dst string) error {
 
 // Set 写入记忆（当前作用域）
 func (s *Store) Set(key, value, source string) error {
+	return s.SetScoped(s.scope, key, value, source)
+}
+
+// SetScoped writes through the same locked store while selecting a different
+// target scope, so parallel workers cannot overwrite each other's snapshots.
+func (s *Store) SetScoped(scope, key, value, source string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return fmt.Errorf("memory scope 不能为空")
+	}
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return fmt.Errorf("memory key 不能为空")
@@ -224,11 +234,11 @@ func (s *Store) Set(key, value, source string) error {
 		return err
 	}
 
-	id := entryID(s.scope, key)
+	id := entryID(scope, key)
 	s.entries[id] = &Entry{
 		Key:       key,
 		Value:     value,
-		Scope:     s.scope,
+		Scope:     scope,
 		UpdatedAt: time.Now(),
 		Source:    source,
 	}
@@ -238,33 +248,23 @@ func (s *Store) Set(key, value, source string) error {
 
 // SetGlobal 写入全局记忆
 func (s *Store) SetGlobal(key, value, source string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return fmt.Errorf("memory key 不能为空")
-	}
-	if err := validateMemoryContent(key, value); err != nil {
-		return err
-	}
-
-	id := entryID(ScopeGlobal, key)
-	s.entries[id] = &Entry{
-		Key:       key,
-		Value:     value,
-		Scope:     ScopeGlobal,
-		UpdatedAt: time.Now(),
-		Source:    source,
-	}
-	s.dirty = true
-	return s.saveLocked()
+	return s.SetScoped(ScopeGlobal, key, value, source)
 }
 
 // Delete 删除当前作用域的记忆
 func (s *Store) Delete(key string) error {
+	return s.DeleteScoped(s.scope, key)
+}
+
+// DeleteScoped removes a key from exactly one target scope.
+func (s *Store) DeleteScoped(scope, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := entryID(s.scope, key)
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return fmt.Errorf("memory scope 不能为空")
+	}
+	id := entryID(scope, key)
 	if _, ok := s.entries[id]; !ok {
 		return fmt.Errorf("未找到记忆: %s", key)
 	}
@@ -275,15 +275,7 @@ func (s *Store) Delete(key string) error {
 
 // DeleteGlobal 删除全局记忆
 func (s *Store) DeleteGlobal(key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := entryID(ScopeGlobal, key)
-	if _, ok := s.entries[id]; !ok {
-		return fmt.Errorf("未找到全局记忆: %s", key)
-	}
-	delete(s.entries, id)
-	s.dirty = true
-	return s.saveLocked()
+	return s.DeleteScoped(ScopeGlobal, key)
 }
 
 // Clear 删除结构化记忆。scope 支持 all/global/target(local/current)。
@@ -321,12 +313,17 @@ func (s *Store) Clear(scope string) (int, error) {
 
 // ActiveEntries 返回当前会话可见的记忆（global + 当前 scope）
 func (s *Store) ActiveEntries() []Entry {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.activeEntriesLocked()
+	return s.ActiveEntriesForScope(s.scope)
 }
 
-func (s *Store) activeEntriesLocked() []Entry {
+// ActiveEntriesForScope returns global memory plus one target's memory.
+func (s *Store) ActiveEntriesForScope(scope string) []Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeEntriesLocked(scope)
+}
+
+func (s *Store) activeEntriesLocked(scope string) []Entry {
 	selected := make(map[string]Entry)
 	for _, e := range s.entries {
 		if e.Scope == ScopeGlobal {
@@ -335,7 +332,7 @@ func (s *Store) activeEntriesLocked() []Entry {
 	}
 	// Target-specific memory always overrides a global value with the same key.
 	for _, e := range s.entries {
-		if e.Scope == s.scope {
+		if e.Scope == scope {
 			selected[e.Key] = *e
 		}
 	}
@@ -358,6 +355,11 @@ func (s *Store) FormatPrompt() string {
 
 // FormatPromptBudget 按固定预算注入长期记忆，避免 AGENTS.md/KV 无限挤占任务上下文。
 func (s *Store) FormatPromptBudget(maxChars int) string {
+	return s.FormatPromptBudgetForScope(s.scope, maxChars)
+}
+
+// FormatPromptBudgetForScope injects only global and selected-target memory.
+func (s *Store) FormatPromptBudgetForScope(scope string, maxChars int) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxChars < 4000 {
@@ -404,11 +406,11 @@ AGENTS.md 不要求用户手动维护。AGENTS.md 用途: 长期稳定规则、�
 		}
 	}
 
-	entries := s.activeEntriesLocked()
+	entries := s.activeEntriesLocked(scope)
 	if len(entries) > 0 {
 		sort.SliceStable(entries, func(i, j int) bool {
-			iTarget := entries[i].Scope == s.scope
-			jTarget := entries[j].Scope == s.scope
+			iTarget := entries[i].Scope == scope
+			jTarget := entries[j].Scope == scope
 			if iTarget != jTarget {
 				return iTarget
 			}
@@ -421,7 +423,7 @@ AGENTS.md 不要求用户手动维护。AGENTS.md 用途: 长期稳定规则、�
 		b.WriteString("以下是从历史会话中保存的关键信息。\n\n")
 		for _, e := range entries {
 			scopeTag := e.Scope
-			if e.Scope == s.scope {
+			if e.Scope == scope {
 				scopeTag = "当前目标"
 			}
 			line := fmt.Sprintf("- [%s] **%s**: %s\n", scopeTag, e.Key, truncateMemoryPrompt(e.Value, 1200))
@@ -458,7 +460,7 @@ func (s *Store) Count() int {
 func (s *Store) HasContent() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.activeEntriesLocked()) > 0 || len(s.agentsMD) > 0
+	return len(s.activeEntriesLocked(s.scope)) > 0 || len(s.agentsMD) > 0
 }
 
 // AgentsMDCount 已加载的 AGENTS.md 文件数

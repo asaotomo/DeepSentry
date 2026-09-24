@@ -3,10 +3,12 @@ package harness
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"ai-edr/internal/analyzer"
 	"ai-edr/internal/runtimev3"
+	"ai-edr/internal/tools"
 )
 
 type injectedExecutor struct {
@@ -35,6 +37,40 @@ func (s *runtimeCaptureSink) Emit(_ context.Context, event runtimev3.RunEvent) e
 type runLoopCaptureUI struct{ events []UIEvent }
 
 func (s *runLoopCaptureUI) Emit(event UIEvent) { s.events = append(s.events, event) }
+
+func TestRunLoopStreamDeltasCarryOnlyNewText(t *testing.T) {
+	agent := &DeepAgent{State: NewAgentState("")}
+	history := []analyzer.Message{{Role: "user", Content: "answer"}}
+	ui := &runLoopCaptureUI{}
+	result := agent.RunLoop(RunLoopConfig{
+		History: &history, MaxSteps: 1, BatchMode: true, UI: ui,
+		ModelStep: func(opts analyzer.StepOptions) (analyzer.AgentResponse, error) {
+			for _, delta := range []string{"first", " second", " third"} {
+				opts.OnStream(delta)
+			}
+			return analyzer.AgentResponse{Action: "finish", FinalReport: "done", IsFinished: true}, nil
+		},
+	})
+	if result.Status != RunStatusCompleted {
+		t.Fatalf("run result: %+v", result)
+	}
+	var deltas []string
+	var full string
+	for _, event := range ui.events {
+		switch event.Kind {
+		case EventStreamDelta:
+			if event.Detail != "" {
+				t.Fatalf("delta repeated accumulated text: %#v", event)
+			}
+			deltas = append(deltas, event.Message)
+		case EventStreamEnd:
+			full = event.Detail
+		}
+	}
+	if got := strings.Join(deltas, ""); got != "first second third" || full != got {
+		t.Fatalf("delta/end mismatch: deltas=%q full=%q", got, full)
+	}
+}
 
 func TestParseActionPreservesNativeToolBatchAndNestedArguments(t *testing.T) {
 	action := ParseAction(analyzer.AgentResponse{Action: "tool_batch", NativeToolCalls: []analyzer.NativeToolCall{
@@ -89,6 +125,41 @@ func TestNativeToolEnvelopeRequiresMatchingToolName(t *testing.T) {
 	got := unwrapNativeToolEnvelope("file_download", args)
 	if got["tool_name"] != "file_upload" || got["remote_path"] != "" {
 		t.Fatalf("mismatched envelope must remain untouched: %#v", got)
+	}
+}
+
+func TestParseActionDropsEmptyAgentEnvelopeAroundConcreteTool(t *testing.T) {
+	computer := ParseAction(analyzer.AgentResponse{
+		Action:   "tool",
+		ToolName: "computer_use",
+		ToolArgs: parseNativeToolArgs(`{"action":"observe","tool_name":"computer_use","tool_args":null,"thought":"read the screen","is_finished":false,"command":"","content":"","path":"E:\\Aone.png","glob_pattern2":"junk","memory_key":"x"}`),
+	})
+	if computer.ToolArgs["action"] != "observe" || len(computer.ToolArgs) != 1 {
+		t.Fatalf("computer_use envelope leaked: %#v", computer.ToolArgs)
+	}
+	if err := tools.ValidateCall("computer_use", computer.ToolArgs); err != nil {
+		t.Fatal(err)
+	}
+
+	script := ParseAction(analyzer.AgentResponse{
+		Action:   "tool",
+		ToolName: "script_run",
+		ToolArgs: parseNativeToolArgs(`{"action":"tool","tool_name":"script_run","tool_args":{},"content":"print(1)","language":"python","thought":"parse db","is_finished":false,"final_report":"","path_dummy":"z"}`),
+	})
+	if script.ToolArgs["content"] != "print(1)" || script.ToolArgs["language"] != "python" || script.ToolArgs["thought"] != "" || script.ToolArgs["path_dummy"] != "" {
+		t.Fatalf("script_run business arguments were not preserved: %#v", script.ToolArgs)
+	}
+	if err := tools.ValidateCall("script_run", script.ToolArgs); err != nil {
+		t.Fatal(err)
+	}
+
+	plain := ParseAction(analyzer.AgentResponse{
+		Action:   "tool",
+		ToolName: "script_run",
+		ToolArgs: map[string]string{"content": "print(1)", "language": "python"},
+	})
+	if plain.ToolArgs["content"] != "print(1)" || plain.ToolArgs["language"] != "python" || len(plain.ToolArgs) != 2 {
+		t.Fatalf("ordinary script arguments changed: %#v", plain.ToolArgs)
 	}
 }
 
@@ -220,6 +291,44 @@ func TestRunLoopUsesInjectedModelAndExecutorEndToEnd(t *testing.T) {
 	}
 	if !seenFinish {
 		t.Fatalf("finish event missing: %#v", ui.events)
+	}
+}
+
+func TestRunLoopStopAfterToolPreservesResultInCheckpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const sessionID = "session_cancelled_tool_result"
+	checkpoint, err := NewCheckpointStore(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	agent := &DeepAgent{State: NewAgentState(""), SessionID: sessionID, Checkpoint: checkpoint}
+	history := []analyzer.Message{{Role: "user", Content: "inspect"}}
+	modelCalls := 0
+	result := agent.RunLoop(RunLoopConfig{
+		History: &history, BatchMode: true, PlanMode: true, MaxSteps: 2,
+		UI: &runLoopCaptureUI{}, Stop: stop,
+		ModelStep: func(analyzer.StepOptions) (analyzer.AgentResponse, error) {
+			modelCalls++
+			return analyzer.AgentResponse{Action: "execute", Command: "inspect", ToolCallID: "call_stopped", ToolCallName: "agent_action"}, nil
+		},
+		ActionHandler: func(*StepContext, *AgentAction) (*ActionResult, error) {
+			close(stop)
+			return &ActionResult{Output: "tool evidence"}, nil
+		},
+	})
+	if result.Status != RunStatusCancelled || modelCalls != 1 {
+		t.Fatalf("result=%+v model calls=%d", result, modelCalls)
+	}
+	loaded, err := LoadCheckpoint(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.State.CompletedToolCalls["call_stopped"]; !ok {
+		t.Fatal("completed call missing from checkpoint")
+	}
+	if len(loaded.History) != 3 || loaded.History[1].Role != "assistant" || loaded.History[2].Role != "tool" || loaded.History[2].ToolCallID != "call_stopped" || loaded.History[2].Content != "tool evidence" {
+		t.Fatalf("tool evidence missing from checkpoint history: %#v", loaded.History)
 	}
 }
 

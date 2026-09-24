@@ -36,9 +36,13 @@ func surveyOpts(extra ...survey.AskOpt) []survey.AskOpt {
 }
 
 func askOne(prompt survey.Prompt, response interface{}, extra ...survey.AskOpt) error {
+	restore := useSurveyConsoleInput()
+	defer restore()
 	return survey.AskOne(prompt, response, surveyOpts(extra...)...)
 }
 
 func ask(questions []*survey.Question, response interface{}, extra ...survey.AskOpt) error {
+	restore := useSurveyConsoleInput()
+	defer restore()
 	return survey.Ask(questions, response, surveyOpts(extra...)...)
 }

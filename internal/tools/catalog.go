@@ -71,6 +71,7 @@ func FormatCatalogDetail(category, query string) string {
 
 	category = strings.TrimSpace(category)
 	query = strings.ToLower(strings.TrimSpace(query))
+	searchQuery := NewSearchQuery(query)
 	byCat := make(map[string][]*Tool)
 	scores := make(map[string]int)
 	var matched []*Tool
@@ -84,7 +85,7 @@ func FormatCatalogDetail(category, query string) string {
 			continue
 		}
 		if query != "" {
-			score := SearchRelevance(t, query)
+			score := SearchRelevanceForQuery(t, searchQuery)
 			if score <= 0 {
 				continue
 			}

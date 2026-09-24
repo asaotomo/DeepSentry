@@ -181,6 +181,101 @@ func TestLLMFailoverUsesConfiguredFallback(t *testing.T) {
 	}
 }
 
+func TestLLMEmptyMessageFailsInsteadOfProducingBlankAgentTurn(t *testing.T) {
+	original := config.GlobalConfig
+	t.Cleanup(func() { config.GlobalConfig = original })
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}]}`))
+	}))
+	defer server.Close()
+	config.GlobalConfig = config.Config{Provider: "custom", APIProtocol: "openai_chat", ApiURL: server.URL, ApiKey: "none", ModelName: "blank"}
+	_, err := CallLLMWithRetryContext(context.Background(), []Message{{Role: "user", Content: "inspect"}}, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "empty response") || requests != 1 {
+		t.Fatalf("blank provider response was treated as success or retried indefinitely: err=%v requests=%d", err, requests)
+	}
+}
+
+func TestLLMEmptyMessageCanFailOverToUsableModel(t *testing.T) {
+	original := config.GlobalConfig
+	t.Cleanup(func() { config.GlobalConfig = original })
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"  "}}]}`))
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"finish\",\"final_report\":\"recovered\"}"}}]}`))
+	}))
+	defer fallback.Close()
+	config.GlobalConfig = config.Config{
+		Provider: "custom", APIProtocol: "openai_chat", ApiURL: primary.URL, ApiKey: "none", ModelName: "primary",
+		Models: []config.ModelConfig{
+			{ID: "primary", Role: "primary", Provider: "custom", APIProtocol: "openai_chat", APIURL: primary.URL, ModelName: "primary"},
+			{ID: "fallback", Role: "fallback", Provider: "custom", APIProtocol: "openai_chat", APIURL: fallback.URL, ModelName: "fallback"},
+		},
+		ModelRouting: config.ModelRoutingConfig{FailoverOn: []string{"invalid_output"}},
+	}
+	result, err := CallLLMWithRetryContext(context.Background(), []Message{{Role: "user", Content: "inspect"}}, false, nil)
+	if err != nil || result.ModelID != "fallback" || !strings.Contains(result.Content, "recovered") {
+		t.Fatalf("empty primary response did not fail over: result=%#v err=%v", result, err)
+	}
+}
+
+func TestLLMEmptyStreamAndBlankToolCallFailOver(t *testing.T) {
+	original := config.GlobalConfig
+	t.Cleanup(func() { config.GlobalConfig = original })
+	for _, tc := range []struct {
+		name   string
+		stream bool
+		body   string
+	}{
+		{name: "whitespace stream", stream: true, body: "data: {\"choices\":[{\"delta\":{\"content\":\"  \"}}]}\n\ndata: [DONE]\n"},
+		{name: "blank tool call", body: `{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_blank","function":{"name":"","arguments":"{}"}}]}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer primary.Close()
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"action\\\":\\\"finish\\\",\\\"final_report\\\":\\\"recovered\\\"}\"}}]}\n\ndata: [DONE]\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"finish\",\"final_report\":\"recovered\"}"}}]}`))
+			}))
+			defer fallback.Close()
+			config.GlobalConfig = config.Config{
+				Provider: "custom", APIProtocol: "openai_chat", ApiURL: primary.URL, ApiKey: "none", ModelName: "primary",
+				Models: []config.ModelConfig{
+					{ID: "primary", Role: "primary", Provider: "custom", APIProtocol: "openai_chat", APIURL: primary.URL, ModelName: "primary", MaxRetries: 0},
+					{ID: "fallback", Role: "fallback", Provider: "custom", APIProtocol: "openai_chat", APIURL: fallback.URL, ModelName: "fallback", MaxRetries: 0},
+				},
+				ModelRouting: config.ModelRoutingConfig{FailoverOn: []string{"invalid_output"}},
+			}
+			var onStream func(string)
+			if tc.stream {
+				onStream = func(string) {}
+			}
+			result, err := CallLLMWithRetryContext(context.Background(), []Message{{Role: "user", Content: "inspect"}}, false, onStream)
+			if err != nil || result.ModelID != "fallback" || !strings.Contains(result.Content, "recovered") {
+				t.Fatalf("blank output did not fail over: result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatibleRetriesWithoutUnsupportedMaxTokens(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,11 +299,101 @@ func TestOpenAICompatibleRetriesWithoutUnsupportedMaxTokens(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := callOpenAICompatible(context.Background(), config.Config{
+	cfg := config.Config{
 		ApiURL: server.URL, ModelName: "local-model", ApiKey: "none",
-	}, []Message{{Role: "user", Content: "hi"}}, false, nil)
-	if err != nil || requests != 2 {
+	}
+	_, err := callOpenAICompatible(context.Background(), cfg, []Message{{Role: "user", Content: "hi"}}, false, nil)
+	if err == nil {
+		_, err = callOpenAICompatible(context.Background(), cfg, []Message{{Role: "user", Content: "again"}}, false, nil)
+	}
+	if err != nil || requests != 3 {
 		t.Fatalf("max_tokens compatibility fallback failed: requests=%d err=%v", requests, err)
+	}
+}
+
+func TestExplicitUnsupportedToolsAreSkippedOnNextTurn(t *testing.T) {
+	requests, withTools := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Tools) > 0 {
+			withTools++
+			http.Error(w, `{"error":"unknown parameter tools"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	cfg := config.Config{Provider: "custom", APIProtocol: config.ProtocolOpenAIChat, ApiURL: server.URL, ModelName: "local-model", ApiKey: "none"}
+	for i := 0; i < 2; i++ {
+		if _, err := callLLMOnce(context.Background(), cfg, []Message{{Role: "user", Content: "inspect"}}, true, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests != 3 || withTools != 1 {
+		t.Fatalf("unsupported tools retried unnecessarily: requests=%d with_tools=%d", requests, withTools)
+	}
+}
+
+func TestGenericBadRequestDoesNotDisableNativeTools(t *testing.T) {
+	requests, withTools := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Tools) > 0 {
+			withTools++
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	cfg := config.Config{Provider: "custom", APIProtocol: config.ProtocolOpenAIChat, ApiURL: server.URL, ModelName: "local-model", ApiKey: "none"}
+	for i := 0; i < 2; i++ {
+		if _, err := callLLMOnce(context.Background(), cfg, []Message{{Role: "user", Content: "inspect"}}, true, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests != 4 || withTools != 2 {
+		t.Fatalf("generic 400 disabled native tools: requests=%d with_tools=%d", requests, withTools)
+	}
+}
+
+func TestExplicitUnsupportedStreamOptionsAreSkippedOnNextTurn(t *testing.T) {
+	requests, withOptions := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.StreamOptions != nil {
+			withOptions++
+			http.Error(w, `{"error":"unknown parameter stream_options"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"ok"}}]}`)
+		_, _ = fmt.Fprintln(w, "data: [DONE]")
+	}))
+	defer server.Close()
+	cfg := config.Config{Provider: "custom", APIProtocol: config.ProtocolOpenAIChat, ApiURL: server.URL, ModelName: "local-model", ApiKey: "none"}
+	for i := 0; i < 2; i++ {
+		result, err := callOpenAICompatible(context.Background(), cfg, []Message{{Role: "user", Content: "inspect"}}, false, func(string) {})
+		if err != nil || result.Content != "ok" {
+			t.Fatalf("stream compatibility fallback failed: result=%#v err=%v", result, err)
+		}
+	}
+	if requests != 3 || withOptions != 1 {
+		t.Fatalf("unsupported stream_options retried unnecessarily: requests=%d with_options=%d", requests, withOptions)
 	}
 }
 
@@ -352,6 +537,33 @@ func TestClaude5MessagesUsesThinkingBudgetAndParsesThinking(t *testing.T) {
 	}
 }
 
+func TestClaudeOpus55UsesDefaultMediumEffort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if raw["model"] != "claude-opus-5-5" || raw["max_tokens"] != float64(65536) {
+			t.Fatalf("unexpected Opus 5.5 request: %#v", raw)
+		}
+		if _, ok := raw["thinking"]; ok {
+			t.Fatalf("Opus 5.5 should use adaptive thinking: %#v", raw["thinking"])
+		}
+		if output, ok := raw["output_config"].(map[string]interface{}); !ok || output["effort"] != "medium" {
+			t.Fatalf("unexpected Opus 5.5 effort: %#v", raw["output_config"])
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer server.Close()
+
+	if _, err := callAnthropic(context.Background(), config.Config{
+		ApiURL: server.URL + "/v1/messages", APIProtocol: config.ProtocolAnthropicMessages,
+		ModelName: "claude-opus-5-5", ApiKey: "test",
+	}, []Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestClaudeHaikuSkipsEffortAndHonorsReservedOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var raw map[string]interface{}
@@ -391,47 +603,80 @@ func TestClaudeRefusalStopReasonIsError(t *testing.T) {
 	}
 }
 
-func TestResponsesProtocolUsesSingleEndpointAndAstraParameters(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/gateway/v1/responses" {
-			t.Errorf("wrong path: %s", r.URL.Path)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-		}
-		if _, ok := body["temperature"]; ok {
-			t.Error("Astra rejects temperature")
-		}
-		if body["model"] != "gpt-6-astra" {
-			t.Error(body["model"])
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
-	}))
-	defer server.Close()
-	c := config.Config{Provider: "openai", ApiURL: server.URL + "/gateway/v1/chat/completions", APIProtocol: config.ProtocolOpenAIResponses, ModelName: "gpt-6-astra", Temperature: 0.5}
-	config.ApplyProviderDefaults(&c)
-	result, err := callLLMOnce(context.Background(), c, []Message{{Role: "user", Content: "test"}}, false, nil)
-	if err != nil || result.Content != "ok" || result.Usage.TotalTokens != 3 {
-		t.Fatalf("%+v %v", result, err)
+func TestResponsesProtocolUsesSingleEndpointAndGPT6Parameters(t *testing.T) {
+	for _, model := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		t.Run(model, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/gateway/v1/responses" {
+					t.Errorf("wrong path: %s", r.URL.Path)
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if _, ok := body["temperature"]; ok {
+					t.Error("GPT-6 reasoning rejects temperature")
+				}
+				if body["model"] != model {
+					t.Error(body["model"])
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
+			}))
+			defer server.Close()
+			c := config.Config{Provider: "openai", ApiURL: server.URL + "/gateway/v1/chat/completions", APIProtocol: config.ProtocolOpenAIResponses, ModelName: model, Temperature: 0.5}
+			config.ApplyProviderDefaults(&c)
+			result, err := callLLMOnce(context.Background(), c, []Message{{Role: "user", Content: "test"}}, false, nil)
+			if err != nil || result.Content != "ok" || result.Usage.TotalTokens != 3 {
+				t.Fatalf("%+v %v", result, err)
+			}
+		})
 	}
 }
 
-func TestAstraChatMarshalingOmitsUnsupportedFields(t *testing.T) {
-	b, err := json.Marshal(ChatRequest{Model: "gpt-6-astra", Temperature: 0.5, MaxTokens: 8192})
-	if err != nil {
-		t.Fatal(err)
+func TestGPT6ChatMarshalingOmitsUnsupportedFields(t *testing.T) {
+	for _, model := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		t.Run(model, func(t *testing.T) {
+			b, err := json.Marshal(ChatRequest{Model: model, Temperature: 0.5, MaxTokens: 8192})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req map[string]any
+			json.Unmarshal(b, &req)
+			if _, ok := req["temperature"]; ok {
+				t.Fatal(string(b))
+			}
+			if _, ok := req["max_tokens"]; ok {
+				t.Fatal(string(b))
+			}
+			if req["max_completion_tokens"] != float64(8192) {
+				t.Fatal(string(b))
+			}
+		})
 	}
-	var req map[string]any
-	json.Unmarshal(b, &req)
-	if _, ok := req["temperature"]; ok {
-		t.Fatal(string(b))
-	}
-	if _, ok := req["max_tokens"]; ok {
-		t.Fatal(string(b))
-	}
-	if req["max_completion_tokens"] != float64(8192) {
-		t.Fatal(string(b))
+}
+
+func TestGPT6ChatDoesNotSendNativeToolsAtDefaultReasoningEffort(t *testing.T) {
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		t.Run(model, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := request["tools"]; ok {
+					t.Fatalf("native tools require reasoning_effort none in Chat Completions: %#v", request["tools"])
+				}
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			}))
+			defer server.Close()
+			_, err := callLLMOnce(context.Background(), config.Config{
+				Provider: "openai", APIProtocol: config.ProtocolOpenAIChat,
+				ApiURL: server.URL + "/v1/chat/completions", ModelName: model, ApiKey: "test",
+			}, []Message{{Role: "user", Content: "hi"}}, true, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

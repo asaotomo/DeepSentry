@@ -13,17 +13,18 @@ license: Apache-2.0
 
 ## 防守优先级
 
-1. 服务可用性：用 `awd_service_check` 检查 HTTP/TCP 状态。
-2. 暴露面：用 `port_listen`、`net_connections`、`process_list` 建立基线。
-3. Webshell：委派 `webshell-hunter`，结合 `file_ident`、`file_strings`、最近修改文件。
-4. 日志证据：委派 `log-analyst`，读取 Web/auth/syslog 最近异常。
-5. Flag/敏感线索：用 `flag_scan` 找明文 flag、token、异常备份。
-6. 修复动作必须确认：改文件、上传、批量命令、脚本、转发都不能自动执行。
+1. 先确认比赛授权范围、目标名、服务 URL/端口、预期状态码和关键文本；多目标先调用 `fleet_inventory` 核对匹配数量。
+2. 服务可用性：用 `awd_service_check` 并发检查 HTTP/TCP。HTTP 4xx 是 WARN，5xx 是 DOWN；带认证或自定义健康页时传 `expected_status` / `contains`。TCP OPEN 只说明端口可连，不能证明应用正常。
+3. 暴露面：在指定单目标上用 `port_listen`、`net_connections`、`process_list` 建立基线；多目标相同只读巡检用 `fleet_exec`。Windows 与 Linux 必须分组，分别使用对应命令和路径语法。
+4. Webshell：委派 `webshell-hunter`，结合 `file_ident`、`file_strings`、最近修改文件；日志委派 `log-analyst`，保留时间、路径、进程和连接证据。
+5. Flag/敏感线索：用 `flag_scan` 找明文 flag、token、异常备份，不在报告中暴露完整密钥。
+6. 处置前明确目标选择器、匹配数量、受影响服务和回滚路径；按运行器风险确认执行，先少量目标验证，再扩展到同组，最后逐服务复验。
 
 ## 推荐工具
 
 ```json
 {"action":"tool","tool_name":"awd_service_check","tool_args":{"targets":"http://127.0.0.1:8080,127.0.0.1:22","timeout":"3"}}
+{"action":"tool","tool_name":"fleet_inventory","tool_args":{"selector":"tag:awd,protocol:ssh"}}
 {"action":"tool","tool_name":"flag_scan","tool_args":{"root":"/var/www","limit":"100"}}
 {"action":"task","task_name":"webshell-hunter","task_prompt":"检查 /var/www 下可疑 Webshell，不要删除文件"}
 ```
@@ -33,10 +34,12 @@ license: Apache-2.0
 ```text
 ## AWD 防守报告
 ### 服务状态
+每项写明目标、URL/端口、预期值、实测状态、延迟和检查时间。
 ### 高风险发现
 ### 入侵/后门证据
 ### Flag/敏感信息暴露
 ### 建议处置队列
+每项写明目标范围、动作、影响、复验结果或阻塞原因。
 ```
 
 ## 边界

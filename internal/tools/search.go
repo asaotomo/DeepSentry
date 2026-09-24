@@ -2,35 +2,76 @@ package tools
 
 import (
 	"strings"
+	"sync"
 	"unicode"
 )
+
+// SearchQuery keeps query tokenization out of per-tool scoring loops.
+type SearchQuery struct {
+	text   string
+	tokens []string
+}
+
+func NewSearchQuery(query string) SearchQuery {
+	text := strings.ToLower(strings.TrimSpace(query))
+	if text == "" {
+		return SearchQuery{}
+	}
+	return SearchQuery{text: text, tokens: searchTokens(text)}
+}
+
+type searchDocument struct {
+	name, category, description, argsHint string
+	tokens                                map[string]bool
+}
+
+var searchDocuments sync.Map // map[*Tool]searchDocument
+
+func documentTokens(tool *Tool) map[string]bool {
+	if value, ok := searchDocuments.Load(tool); ok {
+		cached := value.(searchDocument)
+		if cached.name == tool.Name && cached.category == tool.Category &&
+			cached.description == tool.Description && cached.argsHint == tool.ArgsHint {
+			return cached.tokens
+		}
+	}
+	aliases := strings.Join(toolSearchAliases[tool.Name], " ")
+	haystack := strings.ToLower(tool.Name + " " + tool.Category + " " + tool.Description + " " + tool.ArgsHint + " " + aliases)
+	entry := searchDocument{
+		name: tool.Name, category: tool.Category, description: tool.Description,
+		argsHint: tool.ArgsHint, tokens: searchTokenSet(haystack),
+	}
+	searchDocuments.Store(tool, entry)
+	return entry.tokens
+}
 
 // SearchRelevance is the shared lexical retrieval contract used both by the
 // Runtime v3 deferred schema selector and tool_catalog. Sharing it prevents a
 // tool from being discoverable in the first turn but disappearing when the
 // model explicitly searches the catalog on the next turn.
 func SearchRelevance(tool *Tool, query string) int {
+	return SearchRelevanceForQuery(tool, NewSearchQuery(query))
+}
+
+func SearchRelevanceForQuery(tool *Tool, query SearchQuery) int {
 	if tool == nil {
 		return 0
 	}
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query == "" {
+	if query.text == "" {
 		return 1
 	}
-	aliases := strings.Join(toolSearchAliases[tool.Name], " ")
-	haystack := strings.ToLower(tool.Name + " " + tool.Category + " " + tool.Description + " " + tool.ArgsHint + " " + aliases)
 	score := 0
-	if strings.Contains(query, strings.ToLower(tool.Name)) {
+	if strings.Contains(query.text, strings.ToLower(tool.Name)) {
 		score += 100
 	}
 	for _, alias := range toolSearchAliases[tool.Name] {
-		if alias = strings.ToLower(strings.TrimSpace(alias)); alias != "" && strings.Contains(query, alias) {
+		if alias = strings.ToLower(strings.TrimSpace(alias)); alias != "" && strings.Contains(query.text, alias) {
 			score += 24
 		}
 	}
-	documentTokens := searchTokenSet(haystack)
-	for _, token := range searchTokens(query) {
-		if documentTokens[token] {
+	tokens := documentTokens(tool)
+	for _, token := range query.tokens {
+		if tokens[token] {
 			score += searchTokenWeight(token)
 		}
 	}
@@ -45,6 +86,9 @@ func SearchAliases(name string) []string {
 }
 
 var toolSearchAliases = map[string][]string{
+	"task_wait":              {"等待下载", "下载完成", "等待文件", "等下载", "smart wait", "等待条件"},
+	"task_context":           {"长任务", "任务进度", "恢复任务", "工作记录"},
+	"schedule_task":          {"每分钟", "每30分钟", "两小时后", "2小时后", "周期任务", "定时任务", "延时任务"},
 	"host_incident_baseline": {"主机应急", "应急基线", "incident baseline"},
 	"proc_socket_map":        {"异常外联", "外联进程", "socket pid", "c2 process"},
 	"service_unit_audit":     {"异常自启动", "启动项", "持久化", "persistence"},
@@ -63,6 +107,7 @@ var toolSearchAliases = map[string][]string{
 	"fleet_exec":             {"fleet批量", "批量端口", "多目标健康", "ssh中断", "批量巡检"},
 	"fleet_file":             {"多目标证据文件", "批量文件", "fleet file"},
 	"web_snapshot":           {"网页表单", "页面脚本", "forms scripts", "网页快照"},
+	"computer_use":           {"computer use", "桌面操作", "操作电脑", "电脑操作", "鼠标", "键盘", "桌面截图", "点击屏幕", "desktop", "desktop automation", "打开微信", "微信客户端", "本机微信", "桌面应用", "原生应用", "辅助功能", "ui自动化", "屏幕截图", "屏幕操作"},
 	"browser_browse":         {"分页公告", "跟进链接", "持续浏览", "安全公告", "advisory"},
 	"db_config_audit":        {"redis危险配置", "数据库配置审计"},
 	"mysql_probe":            {"mysql版本", "mysql握手", "mysql handshake"},

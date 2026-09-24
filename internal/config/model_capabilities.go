@@ -29,6 +29,9 @@ func (c Config) ModelDisplayInfo() string {
 	case "config":
 		operator = "="
 		source = "配置"
+	case "local-runtime":
+		operator = "="
+		source = "运行时"
 	case "model-name":
 		source = "名称推断"
 	case "provider-default":
@@ -82,6 +85,9 @@ func (c Config) EffectiveModelCapabilities() ModelCapabilities {
 		parameterB = inferParameterBillions(c.ModelName)
 	}
 	window, source := c.ContextWindowTokens, "config"
+	if c.LocalContextDiscovered && window > 0 {
+		source = "local-runtime"
+	}
 	if window <= 0 {
 		if preset, ok := FindModelPreset(c.Provider, c.ModelName); ok && preset.ContextWindowTokens > 0 {
 			window, source = preset.ContextWindowTokens, "model-catalog"
@@ -222,7 +228,7 @@ func (m ModelCapabilities) SystemPromptBudgetTokens() int {
 
 func (c Config) IsLocalModelEndpoint() bool {
 	p := strings.ToLower(strings.TrimSpace(c.Provider))
-	if p == string(ProviderOllama) || p == string(ProviderLMStudio) {
+	if IsLocalProvider(p) {
 		return true
 	}
 	u, err := url.Parse(c.ApiURL)

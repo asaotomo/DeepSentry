@@ -2,9 +2,9 @@ package harness
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -38,40 +38,44 @@ func actionFingerprint(action AgentAction) string {
 	case ActionTodo, ActionLoadSkill, ActionFinish, ActionAskUser, ActionRemember, ActionForget:
 		return ""
 	}
-	parts := []string{string(action.Type), strings.ToLower(strings.TrimSpace(action.ToolName))}
-	if cmd := normalizeShellCommand(action.Command); cmd != "" {
-		parts = append(parts, compactFingerprintPart(cmd, 80))
+	// Hash the complete executable payload. Truncating commands or omitting
+	// task/file fields made different work look identical and caused the loop
+	// guard to reject valid delegations or edits. The digest also keeps secrets
+	// in command arguments out of guard warnings and checkpoint metadata.
+	payload := struct {
+		Command        string
+		TaskName       string
+		TaskPrompt     string
+		TargetSelector string
+		TargetName     string
+		TargetProtocol string
+		TargetHost     string
+		ParallelTasks  []SubAgentTaskAction
+		Path           string
+		Content        string
+		Pattern        string
+		OldString      string
+		NewString      string
+		ReplaceAll     bool
+		GlobPattern    string
+		Offset         int
+		Limit          int
+		ToolArgs       map[string]string
+		ToolCalls      []ToolCallAction
+	}{
+		Command: normalizeShellCommand(action.Command), TaskName: action.TaskName,
+		TaskPrompt: action.TaskPrompt, TargetSelector: action.TargetSelector,
+		TargetName: action.TargetName, TargetProtocol: action.TargetProtocol,
+		TargetHost: action.TargetHost, ParallelTasks: action.ParallelTasks,
+		Path: action.Path, Content: action.Content, Pattern: action.Pattern,
+		OldString: action.OldString, NewString: action.NewString,
+		ReplaceAll: action.ReplaceAll, GlobPattern: action.GlobPattern,
+		Offset: action.Offset, Limit: action.Limit,
+		ToolArgs: action.ToolArgs, ToolCalls: action.ToolCalls,
 	}
-	if path := strings.TrimSpace(action.Path); path != "" {
-		parts = append(parts, path)
-	}
-	if len(action.ToolCalls) > 0 {
-		names := make([]string, 0, len(action.ToolCalls))
-		for _, call := range action.ToolCalls {
-			names = append(names, strings.ToLower(call.Name)+"="+sortedArgFingerprint(call.Args))
-		}
-		sort.Strings(names)
-		parts = append(parts, strings.Join(names, ","))
-	} else if len(action.ToolArgs) > 0 {
-		parts = append(parts, sortedArgFingerprint(action.ToolArgs))
-	}
-	return strings.Join(parts, "|")
-}
-
-func sortedArgFingerprint(args map[string]string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(args))
-	for key := range args {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, strings.ToLower(key)+"="+compactFingerprintPart(args[key], 60))
-	}
-	return strings.Join(parts, ",")
+	raw, _ := json.Marshal(payload)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%s|%s|%x", action.Type, strings.ToLower(strings.TrimSpace(action.ToolName)), sum[:16])
 }
 
 func compactFingerprintPart(value string, max int) string {
@@ -542,7 +546,7 @@ func blockedActionResult(action AgentAction, message string) *ActionResult {
 
 func latestUserTask(history []analyzer.Message) string {
 	for i := len(history) - 1; i >= 0; i-- {
-		if !strings.EqualFold(history[i].Role, "user") {
+		if !analyzer.IsRealUserTurn(history[i]) {
 			continue
 		}
 		content := strings.TrimSpace(history[i].Content)

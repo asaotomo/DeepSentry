@@ -14,6 +14,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -75,8 +76,10 @@ func (s *Service) callback(c config.ChatChannel, w http.ResponseWriter, r *http.
 	}
 	reply, err := s.command(c, m)
 	if err != nil {
-		http.Error(w, "request rejected", http.StatusForbidden)
-		return
+		// The signature already verified, so this is a policy rejection.
+		// Platforms retry any non-2xx for hours; acknowledge and drop instead.
+		log.Printf("chat callback dropped channel=%s reason=%s", c.Name, err)
+		reply = ""
 	}
 	if reply != "" {
 		s.enqueue(delivery{channel: c, message: m, text: reply})

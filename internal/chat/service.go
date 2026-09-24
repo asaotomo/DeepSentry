@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,9 +103,13 @@ type Service struct {
 	sessions      map[string]int
 	picks         map[string]sessionPick
 	listSessions  func(string) []chatSessionInfo
+	pruneSessions func(map[string]bool, time.Time) (int, error)
 	liveStatus    map[string]string
 	paired        map[string]string
 	confirms      map[string]string
+	replyContext  map[string]Message
+	replyRoutes   map[string]replyRoute
+	inboxStore    string
 	senders       map[string]func(context.Context, Message, string) error
 	mediaPeers    map[string]*socketPeer
 	stop          context.CancelFunc
@@ -188,15 +193,20 @@ func New(ctx context.Context, cfg config.ChatConfig, run Runner) (*Service, erro
 	client := *config.HTTPClient(12 * time.Second)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	ctx, stop := context.WithCancel(ctx)
-	s := &Service{socketDial: dialSocket, Ready: make(chan struct{}), connections: map[string]context.CancelFunc{}, generations: map[string]int{}, sessions: map[string]int{}, picks: map[string]sessionPick{}, listSessions: lookupChatSessions, liveStatus: map[string]string{}, paired: map[string]string{}, confirms: map[string]string{}, senders: map[string]func(context.Context, Message, string) error{}, stop: stop, cfg: cfg, run: run, ctx: ctx, jobs: map[string]*Job{}, pending: map[string]pendingRun{}, seen: map[string]time.Time{}, cancel: map[string]context.CancelFunc{}, outbound: make(chan delivery, 128), client: &client}
+	s := &Service{socketDial: dialSocket, Ready: make(chan struct{}), connections: map[string]context.CancelFunc{}, generations: map[string]int{}, sessions: map[string]int{}, picks: map[string]sessionPick{}, listSessions: lookupChatSessions, pruneSessions: pruneChatSessions, liveStatus: map[string]string{}, paired: map[string]string{}, confirms: map[string]string{}, replyContext: map[string]Message{}, replyRoutes: map[string]replyRoute{}, senders: map[string]func(context.Context, Message, string) error{}, stop: stop, cfg: cfg, run: run, ctx: ctx, jobs: map[string]*Job{}, pending: map[string]pendingRun{}, seen: map[string]time.Time{}, cancel: map[string]context.CancelFunc{}, outbound: make(chan delivery, 128), client: &client}
 	s.mediaClient = newMediaClient()
 	s.platformMedia = newPlatformMediaClient()
+	s.inboxStore = config.GlobalConfig.SchedulerStore
 	s.box = outboxState{items: map[string]*OutboxItem{}, busy: map[string]bool{}}
 	s.channels = map[string]config.ChatChannel{}
 	for _, c := range cfg.Channels {
 		s.channels[c.Name] = c
 	}
 	watchParent(stop)
+	if err := s.restoreReplyRoutes(); err != nil {
+		stop()
+		return nil, err
+	}
 	s.sessions = loadSessionGens(cfg)
 	data, err := os.ReadFile(cfg.Store)
 	if err == nil {
@@ -211,9 +221,11 @@ func New(ctx context.Context, cfg config.ChatConfig, run Runner) (*Service, erro
 			if j.Status == "running" || j.Status == "cancelling" || j.Status == "queued" {
 				j.Status = "interrupted"
 				j.Result = "服务重启，任务已中断；不会自动重放。"
+				j.Updated = time.Now()
 			}
 			s.jobs[j.ID] = &j
 		}
+		pruneFinishedJobs(s.jobs, time.Now())
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -256,6 +268,8 @@ func (s *Service) Serve() error {
 		s.wg.Add(1)
 		go s.outboxWorker()
 	}
+	s.wg.Add(1)
+	go s.scheduleInboxWorker()
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -266,7 +280,9 @@ func (s *Service) Serve() error {
 		case <-done:
 		}
 	}()
-	log.Printf("DeepSentry chat listening on %s", listener.Addr())
+	log.Printf("DeepSentry chat control listening on %s", listener.Addr())
+	go s.pruneHistoryLoop()
+	s.pruneHistory(time.Now())
 	for _, c := range s.cfg.Channels {
 		if isQuick(c.Platform) {
 			s.Connect(c)
@@ -450,37 +466,59 @@ func (s *Service) command(c config.ChatChannel, m Message) (string, error) {
 		}
 	}
 	if len(s.seen) >= 10000 {
-		return "", errors.New("too many messages")
+		s.evictOldestSeenLocked(5000)
 	}
-	if len(m.Attachments) == 0 && !strings.HasPrefix(text, "/") && !isRestartTalk(normalizeSessionTalk(text)) {
-		if dir := s.confirmDirForOwnerLocked(own); dir != "" {
-			if req, err := ReadConfirmRequest(dir); err == nil && req.Kind == "input" {
-				if err := WriteInputReply(dir, text); err == nil {
-					s.seen[key] = now
-					return "已收到补充信息，继续原任务。", nil
-				}
-			}
+	s.noteReplyContextLocked(c, own, m)
+	if err := s.rememberReplyRouteLocked(c, own, m); err != nil {
+		return "", fmt.Errorf("保存聊天收件路由失败: %w", err)
+	}
+	confirmDir := s.confirmDirForOwnerLocked(own)
+	var pendingReq ConfirmRequest
+	hasPending := false
+	if confirmDir != "" {
+		if req, err := ReadConfirmRequest(confirmDir); err == nil && req.Seq != 0 {
+			pendingReq, hasPending = req, true
 		}
 	}
-	if decision, ok := ParseConfirmText(text); ok {
-		if dir := s.confirmDirForOwnerLocked(own); dir != "" {
-			req, readErr := ReadConfirmRequest(dir)
-			if readErr == nil {
-				if err := WriteConfirmReply(dir, decision); err == nil {
-					s.rememberApprovalLocked(own, req.ScopeKey, decision)
-					if m.ID != "" {
-						s.seen[event(c, m)] = time.Now()
-					}
-					if decision == "deny" {
-						return "已拒绝本次操作。", nil
-					}
-					if decision == "allow_all_session" {
-						return "已允许本次会话所有高危操作；新建、切换会话或重启服务后失效。", nil
-					}
-					return "已收到确认，任务继续。", nil
-				}
-			}
+	isCommand := strings.HasPrefix(text, "/") || isRestartTalk(normalizeSessionTalk(text))
+	addressed := !m.Group || strings.HasPrefix(text, "/ds")
+	if hasPending && pendingReq.Kind == "input" && !isCommand {
+		userText := strings.TrimSpace(m.Text)
+		if userText == "" {
+			s.seen[key] = now
+			return "原任务在等文字补充，图片或文件没法直接交给它。请用文字回复；不想继续就发 /stop。", nil
 		}
+		if err := WriteInputReply(confirmDir, userText); err == nil {
+			s.seen[key] = now
+			if len(m.Attachments) > 0 {
+				return "已收到文字补充，继续原任务。这条消息里的附件没有带进原任务，需要的话等任务结束后再发。", nil
+			}
+			return "已收到补充信息，继续原任务。", nil
+		}
+	}
+	if decision, ok := ParseConfirmText(text); ok && len(m.Attachments) == 0 {
+		if hasPending && pendingReq.Kind != "input" {
+			if err := WriteConfirmReply(confirmDir, decision); err == nil {
+				s.rememberApprovalLocked(own, pendingReq.ScopeKey, decision)
+				s.seen[key] = now
+				switch decision {
+				case "deny":
+					return "已拒绝，这项操作不会执行。", nil
+				case "allow_all_session":
+					return "已允许本次会话所有高危操作；新建、切换会话或重启服务后失效。", nil
+				case "allow_session":
+					return "已允许本会话同类操作，任务继续。", nil
+				}
+				return "已允许本次，任务继续。", nil
+			}
+		} else if IsExplicitConfirmPhrase(text) && addressed {
+			s.seen[key] = now
+			return "当前没有等你确认的操作，这条消息不会开新任务。", nil
+		}
+	}
+	if hasPending && pendingReq.Kind != "input" && !isCommand && len(m.Attachments) == 0 && addressed {
+		s.seen[key] = now
+		return PendingConfirmReminder(pendingReq), nil
 	}
 	// Common IM commands run outside the agent queue, including while a turn is busy.
 	text = normalizeChatCommand(text)
@@ -608,6 +646,81 @@ func (s *Service) command(c config.ChatChannel, m Message) (string, error) {
 	}
 	s.seen[key] = now
 	return response, nil
+}
+
+// evictOldestSeenLocked keeps the newest keep entries. Replays older than the
+// kept window are also covered by jobs[].Event for any message that ran.
+// replyContextPlatforms reply through a credential carried by the inbound
+// message, which expires: WeChat context_token, DingTalk sessionWebhook and
+// QQ passive msg_id.
+func replyContextPlatforms(platform string) bool {
+	return platform == "weixin" || platform == "dingtalk" || platform == "qqbot"
+}
+
+// noteReplyContextLocked keeps the newest reply credential per conversation
+// and re-arms replies that definitely failed on an expired one. Uncertain
+// deliveries are left alone: resending them could duplicate a message.
+func (s *Service) noteReplyContextLocked(c config.ChatChannel, own string, m Message) {
+	if !replyContextPlatforms(c.Platform) {
+		return
+	}
+	s.replyContext[own] = Message{ID: m.ID, ContextToken: m.ContextToken, ReplyURL: m.ReplyURL, ReplyExpires: m.ReplyExpires}
+	s.box.mu.Lock()
+	defer s.box.mu.Unlock()
+	if s.box.busy[own] {
+		return
+	}
+	for _, i := range s.box.items {
+		if i.Ephemeral || i.Status != "failed" || owner(i.Channel, i.Message) != own || time.Since(i.Created) > 24*time.Hour {
+			continue
+		}
+		i.Message.ID = m.ID
+		i.Message.ContextToken = m.ContextToken
+		i.Message.ReplyURL = m.ReplyURL
+		i.Message.ReplyExpires = m.ReplyExpires
+		i.Message.DeliverySeq = 1
+		i.Attempts = 0
+		i.Status = "pending"
+		i.Error = ""
+		i.RetryAt = time.Time{}
+		if err := s.saveOutbox(i); err != nil {
+			i.Status = "failed"
+			i.Error = "保存补发请求失败"
+		}
+	}
+}
+
+// latestReplyContext returns the freshest reply credential for m's
+// conversation, so a long task answers with a token that is still valid.
+func (s *Service) latestReplyContext(c config.ChatChannel, m Message) Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	latest, ok := s.replyContext[owner(c, m)]
+	if !ok {
+		return m
+	}
+	if latest.ContextToken != "" {
+		m.ContextToken = latest.ContextToken
+	}
+	return m
+}
+
+func (s *Service) evictOldestSeenLocked(keep int) {
+	if len(s.seen) <= keep {
+		return
+	}
+	type entry struct {
+		key string
+		at  time.Time
+	}
+	entries := make([]entry, 0, len(s.seen))
+	for k, t := range s.seen {
+		entries = append(entries, entry{k, t})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
+	for _, e := range entries[:len(entries)-keep] {
+		delete(s.seen, e.key)
+	}
 }
 
 func (s *Service) submitLocked(c config.ChatChannel, m Message, own, key, prompt string, now time.Time) string {

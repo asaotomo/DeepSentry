@@ -1,8 +1,8 @@
 package scheduler
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +23,8 @@ type Runner struct {
 	ConfigPath string
 	Logf       func(string, ...any)
 	mu         sync.Mutex
+	slots      chan struct{}
+	execute    func(context.Context, Task, time.Time) (string, string, error)
 }
 
 func NewRunner(cfg config.Config) *Runner {
@@ -37,7 +39,7 @@ func (r *Runner) Start(ctx context.Context, interval time.Duration) {
 		interval = 30 * time.Second
 	}
 	go func() {
-		_, _ = r.RunDue(time.Now())
+		go r.RunDueContext(ctx, time.Now())
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -45,144 +47,161 @@ func (r *Runner) Start(ctx context.Context, interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				_, _ = r.RunDue(now)
+				go r.RunDueContext(ctx, now)
 			}
 		}
 	}()
 }
-
-func (r *Runner) RunDue(now time.Time) (string, error) {
+func (r *Runner) prepare() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if now.IsZero() {
-		now = time.Now()
-	}
 	if r.Store == nil {
 		r.Store = NewStore(r.Config.SchedulerStore)
 	}
-	release, acquired, err := acquireRunLock(r.Store.Path, now)
-	if err != nil {
-		return "", err
+	if r.slots == nil {
+		r.slots = make(chan struct{}, 3)
 	}
-	if !acquired {
-		return "已有另一个 DeepSentry 实例正在调度任务，本轮跳过", nil
+}
+func (r *Runner) RunDue(now time.Time) (string, error) {
+	return r.RunDueContext(context.Background(), now)
+}
+func (r *Runner) RunDueContext(ctx context.Context, now time.Time) (string, error) {
+	r.prepare()
+	if now.IsZero() {
+		now = time.Now()
 	}
-	defer release()
 	due, err := r.Store.Due(now)
 	if err != nil {
 		return "", err
 	}
-	if len(due) == 0 {
-		return "无到期定时任务", nil
-	}
-	var b strings.Builder
+	results := make(chan string, len(due))
+	var wg sync.WaitGroup
 	for _, task := range due {
-		updated := r.runOne(task, now)
-		if err := r.Store.Update(updated); err != nil {
-			b.WriteString(fmt.Sprintf("[ERR] %s 更新状态失败: %v\n", task.ID, err))
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case r.slots <- struct{}{}:
+		default:
 			continue
 		}
-		b.WriteString(fmt.Sprintf("[%s] %s -> %s\n", updated.ID, updated.Name, updated.LastResult))
+		wg.Add(1)
+		go func(task Task) {
+			defer wg.Done()
+			defer func() { <-r.slots }()
+			out, e := r.runClaimed(ctx, task.ID, now, false)
+			if e != nil {
+				out = e.Error()
+			}
+			results <- out
+		}(task)
 	}
-	return strings.TrimSpace(b.String()), nil
+	wg.Wait()
+	close(results)
+	var lines []string
+	for out := range results {
+		if out != "" {
+			lines = append(lines, out)
+		}
+	}
+	if len(lines) == 0 {
+		return "无可执行到期任务（未到期、已运行或执行槽占用）", nil
+	}
+	return strings.Join(lines, "\n"), nil
 }
-
 func (r *Runner) RunNow(id string, now time.Time) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.prepare()
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if r.Store == nil {
-		r.Store = NewStore(r.Config.SchedulerStore)
-	}
-	release, acquired, err := acquireRunLock(r.Store.Path, now)
+	return r.runClaimed(context.Background(), id, now, true)
+}
+func (r *Runner) runClaimed(ctx context.Context, id string, now time.Time, manual bool) (string, error) {
+	// Hash IDs instead of using user-controlled IDs as path components.
+	sum := sha256.Sum256([]byte(id))
+	release, ok, err := acquireRunLock(fmt.Sprintf("%s.%x", r.Store.Path, sum[:8]), now)
 	if err != nil {
 		return "", err
 	}
-	if !acquired {
-		return "", fmt.Errorf("已有另一个 DeepSentry 实例正在调度任务，请稍后重试")
+	if !ok {
+		return "任务已在另一执行器运行", nil
 	}
 	defer release()
-	tasks, err := r.Store.Load()
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	task, claimed, err := r.Store.Claim(id, now, manual)
 	if err != nil {
 		return "", err
 	}
-	for _, task := range tasks {
-		if task.ID == id {
-			updated := r.runOne(task, now)
-			if err := r.Store.Update(updated); err != nil {
-				return "", err
-			}
-			return updated.LastResult, nil
-		}
+	if !claimed {
+		return "", nil
 	}
-	return "", fmt.Errorf("未找到任务: %s", id)
+	updated := r.runOne(ctx, task, now)
+	if err = r.Store.CompleteRun(updated); err != nil {
+		return "", err
+	}
+	return updated.LastResult, nil
 }
 
 const staleRunLockAfter = 6 * time.Hour
 
-func acquireRunLock(storePath string, now time.Time) (release func(), acquired bool, err error) {
+func acquireRunLock(storePath string, now time.Time) (func(), bool, error) {
 	if strings.TrimSpace(storePath) == "" {
 		storePath = DefaultStorePath
 	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	lockPath := storePath + ".run.lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+	path := storePath + ".run.lock"
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, false, err
 	}
-	if err := os.Chmod(filepath.Dir(lockPath), 0o700); err != nil {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
 		return nil, false, err
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		f, openErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if openErr == nil {
-			_, _ = fmt.Fprintf(f, "pid=%d started=%s\n", os.Getpid(), now.Format(time.RFC3339))
-			_ = f.Close()
-			var once sync.Once
-			return func() { once.Do(func() { _ = os.Remove(lockPath) }) }, true, nil
-		}
-		if !os.IsExist(openErr) {
-			return nil, false, openErr
-		}
-		info, statErr := os.Stat(lockPath)
-		if statErr != nil {
-			if os.IsNotExist(statErr) {
-				continue
-			}
-			return nil, false, statErr
-		}
-		if now.Sub(info.ModTime()) <= staleRunLockAfter {
-			return func() {}, false, nil
-		}
-		if removeErr := os.Remove(lockPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			return nil, false, removeErr
-		}
+	if err = tryScheduleLock(f); err != nil {
+		f.Close()
+		return func() {}, false, nil
 	}
-	return func() {}, false, nil
+	var once sync.Once
+	return func() { once.Do(func() { releaseScheduleLock(f); f.Close() }) }, true, nil
 }
 
-func (r *Runner) runOne(task Task, now time.Time) Task {
+func (r *Runner) runOne(ctx context.Context, task Task, now time.Time) Task {
+	timeout := task.TimeoutSec
+	if timeout <= 0 {
+		timeout = 7200
+	}
+	if timeout > 604800 {
+		timeout = 604800
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
 	if now.IsZero() {
 		now = time.Now()
 	}
-	start := now
-	task.LastRunAt = &start
-	task.RunCount++
 	task.UpdatedAt = now
 	reportPath := ""
 	result := ""
 	var err error
-
-	switch task.Kind {
-	case KindInspection:
-		reportPath, result, err = r.executeInspection(task, now)
-	case KindAgent:
-		reportPath, result, err = r.executeAgent(task, now)
-	default:
-		err = fmt.Errorf("未知任务类型: %s", task.Kind)
+	replyText, isReply := directChatReply(task)
+	if isReply {
+		if postErr := postChatInbox(r.Store.Path, ChatInboxLine{TaskID: task.ID, Session: task.ReplySession, Kind: "result", Text: replyText, At: now}); postErr != nil {
+			err = postErr
+		} else {
+			result = "已发送到当前聊天: " + replyText
+		}
+	} else if r.execute != nil {
+		reportPath, result, err = r.execute(ctx, task, now)
+	} else {
+		switch task.Kind {
+		case KindInspection:
+			reportPath, result, err = r.executeInspection(ctx, task, now)
+		case KindAgent:
+			reportPath, result, err = r.executeAgent(ctx, task, now)
+		default:
+			err = fmt.Errorf("未知任务类型: %s", task.Kind)
+		}
 	}
 	if reportPath != "" {
 		task.LastReportPath = reportPath
@@ -195,16 +214,57 @@ func (r *Runner) runOne(task Task, now time.Time) Task {
 	if task.Notify != NotifyNone && reportPath != "" {
 		task.LastResult += r.notifyTask(task, reportPath)
 	}
-	task.RunAt = nextRun(task, now)
+	task.Status = StatusEnabled
+	if err != nil {
+		task.FailureCount++
+	} else {
+		task.FailureCount = 0
+	}
+	finished := time.Now()
+	if finished.Before(now) {
+		finished = now
+	}
+	task.RunAt = nextRun(task, finished)
 	if task.Repeat == RepeatOnce {
 		task.Status = StatusCompleted
+		if err != nil {
+			task.Status = StatusFailed
+		}
 	}
+	if task.FailureCount >= 3 && task.Repeat != RepeatOnce {
+		task.Status = StatusDisabled
+		task.LastResult += "；连续失败三次，已暂停"
+	}
+	if !isReply {
+		if err != nil {
+			r.postRunNotice(task, "error", formatTaskRunNotice("未完成", task, task.LastResult))
+		} else if body := presentRunResult(result, reportPath); body != "" {
+			r.postRunNotice(task, "result", body)
+		}
+	}
+	r.postRunNotice(task, "info", formatRunClock(task, finished))
 	return task
 }
 
-func (r *Runner) executeInspection(task Task, now time.Time) (string, string, error) {
+func (r *Runner) postRunNotice(task Task, kind, text string) {
+	if r == nil || r.Store == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	err := postChatInbox(r.Store.Path, ChatInboxLine{
+		TaskID:  task.ID,
+		Session: task.ReplySession,
+		Kind:    kind,
+		Text:    text,
+		At:      time.Now(),
+	})
+	if err != nil && r.Logf != nil {
+		r.Logf("schedule chat notice: %v", err)
+	}
+}
+
+func (r *Runner) executeInspection(ctx context.Context, task Task, now time.Time) (string, string, error) {
 	if len(r.Config.Inspection.Devices) > 0 {
-		report, err := inspection.Run(context.Background(), r.Config, task.Selector)
+		report, err := inspection.Run(ctx, r.Config, task.Selector)
 		return report.Markdown, "巡检报告：" + report.Markdown + "；Word：" + report.Word, err
 	}
 	command := inspectionCommand()
@@ -263,7 +323,7 @@ func (r *Runner) executeInspection(task Task, now time.Time) (string, string, er
 	return reportPath, "基础状态采集完成（未配置设备判定规则，需复核），报告: " + reportPath, nil
 }
 
-func (r *Runner) executeAgent(task Task, now time.Time) (string, string, error) {
+func (r *Runner) executeAgent(ctx context.Context, task Task, now time.Time) (string, string, error) {
 	if !task.AllowBatch {
 		return "", "", fmt.Errorf("泛化 Agent 定时任务需要 allow_batch=true；巡检场景请使用 kind=inspection")
 	}
@@ -271,13 +331,15 @@ func (r *Runner) executeAgent(task Task, now time.Time) (string, string, error) 
 	if err != nil {
 		return "", "", err
 	}
-	args := []string{"--no-tui", "--quiet", "--batch", "-y", "--task", task.Prompt}
+	args := []string{"--no-tui", "--quiet", "--batch", "-y", "--task", "这是已到期调度的本次执行。直接执行下面任务，时间规则仅为原始计划；不要重复创建定时任务。最终报告只写要给用户看的正文，这段会直接出现在聊天里，不要写报告路径或过程说明。\n" + task.Prompt}
 	if strings.TrimSpace(r.ConfigPath) != "" {
 		args = append([]string{"-c", r.ConfigPath}, args...)
 	}
-	cmd := exec.Command(exe, args...)
+	cmd := exec.CommandContext(ctx, exe, args...)
+	configureScheduleCommand(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = os.Environ()
-	var out bytes.Buffer
+	var out boundedOutput
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err = cmd.Run()
@@ -287,10 +349,17 @@ func (r *Runner) executeAgent(task Task, now time.Time) (string, string, error) 
 	if writeErr != nil {
 		return "", "", writeErr
 	}
+	body := extractDeliveredText(out.String())
 	if err != nil {
-		return reportPath, "", fmt.Errorf("agent batch 执行失败: %w", err)
+		if body == "" {
+			return reportPath, "", fmt.Errorf("agent batch 执行失败: %w", err)
+		}
+		return reportPath, body, fmt.Errorf("agent batch 执行失败: %w", err)
 	}
-	return reportPath, "Agent 任务完成，报告: " + reportPath, nil
+	if body == "" {
+		return reportPath, "", fmt.Errorf("agent 已结束，但最终报告没有可展示的正文。报告: %s", reportPath)
+	}
+	return reportPath, body, nil
 }
 
 func (r *Runner) notifyTask(task Task, reportPath string) string {
@@ -351,8 +420,9 @@ func nextRun(task Task, now time.Time) time.Time {
 		if sec <= 0 {
 			sec = 3600
 		}
-		for !next.After(now) {
-			next = next.Add(time.Duration(sec) * time.Second)
+		d := time.Duration(sec) * time.Second
+		if !next.After(now) {
+			next = next.Add((now.Sub(next)/d + 1) * d)
 		}
 	}
 	return next
@@ -400,4 +470,30 @@ func emptyDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+type boundedOutput struct {
+	data []byte
+	mu   sync.Mutex
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	const limit = 65536
+	if len(p) >= limit {
+		b.data = append(b.data[:0], p[n-limit:]...)
+	} else {
+		b.data = append(b.data, p...)
+		if len(b.data) > limit {
+			b.data = append([]byte(nil), b.data[len(b.data)-limit:]...)
+		}
+	}
+	return n, nil
+}
+func (b *boundedOutput) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.ToValidUTF8(string(b.data), "�")
 }

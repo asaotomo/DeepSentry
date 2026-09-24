@@ -2,6 +2,21 @@ package tui
 
 // bannerTips 启动 Banner 随机展示的使用小技巧（程序启动时抽取一条并固定）。
 var bannerTips = []string{
+	// 2.0.5 报告、聊天回投与桌面
+	"每次对话同时留下 Markdown 报告和 .evidence.jsonl，证据按 SHA256 串成链",
+	"报告按步骤标风险等级和是否经你确认；取消或失败会写明会话未完成",
+	"聊天高危确认只认「允许本次 / 本会话同类 / 本次会话允许所有高危操作 / 拒绝」",
+	"确认期间发别的话只会收到提醒，不会另开任务；10 分钟没回复按拒绝",
+	"在 QQ、微信、钉钉、企业微信或飞书里建的定时任务，到点发回原来的对话",
+	"只在当前聊天发一句话时带 reply_text，不必再开无人值守 Agent",
+	"微信长任务跟着你最新一条消息回复；旧凭据失效后再发一句即可补上",
+	"QQ 被动回复窗口过期后，结果会改发一次主动消息",
+	"电脑操作前先跑 --computer-check；macOS 缺权限时会弹出授权框",
+	"同一应用换了窗口要重新截图，避免点到另一个窗口",
+	"--batch 不会自动点鼠标键盘，桌面输入仍要单独确认",
+	"子任务和主任务共用同一块桌面，不会互相报被占用",
+	"网页优先鹰眼，本机窗口才用 computer_use；能用命令就不用鼠标",
+
 	// 聊天与巡检
 	"SSH/CMD 使用 --chat-setup-cli 配置机器人、查看连接状态和解绑",
 	"图片验证码无法识别时，可通过机器人收图并回复验证码，原任务继续",
@@ -25,7 +40,7 @@ var bannerTips = []string{
 	"Esc 退出输入模式，↑↓/jk 滚动日志",
 	"Shift+Enter / Alt+Enter 可在输入框内换行",
 	"macOS 可直接 ⌘V 粘贴截图，Windows/Linux 用 Ctrl+V",
-	"Ctrl+A 全选输入内容，再按删除即可清空；Ctrl+U 也能一键清空，Ctrl+L 清屏",
+	"macOS 用 ⌘A 全选、⌘Z 撤销输入；其他系统用 Ctrl+A / Ctrl+Z。Ctrl+U 清空，Ctrl+L 清屏",
 	"按 G 快速跳到日志底部",
 	"PgUp / PgDown 翻页浏览 Agent 输出",
 	"鼠标滚轮可上下滚动日志区域",
@@ -137,8 +152,8 @@ var bannerTips = []string{
 	"缺少 webhook、阈值或目标范围时，Agent 会暂停等待补充",
 	"定时任务通知支持钉钉、飞书和 HTTP 邮件网关",
 	"钉钉/飞书加签机器人需要配置对应 secret",
-	"可直接说“每天9点巡检服务器并发飞书”创建 schedule_task",
-	"schedule_task 可查看、立即运行或删除本地定时任务",
+	"在对话里说明周期和要做的事，模型用 task 加 interval_sec 或 run_at 创建定时任务",
+	"/schedule 可查看、修改、取消、重置或删除定时任务；聊天里创建的到点发回原对话",
 	"定时任务可同时通知钉钉、飞书和 HTTP 邮件网关",
 	"browser_browse 可自动打开隔离 Chrome 或无头会话并持续导航，browser_interact 负责确认后的点击和输入",
 	"headless_browser 适合一次性 JavaScript 渲染快照，失败会自动降级静态抓取",

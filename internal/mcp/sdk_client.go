@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"ai-edr/internal/config"
 	"ai-edr/internal/ui"
@@ -572,7 +573,7 @@ func minMCPDuration(left, right time.Duration) time.Duration {
 
 func applyHawkEyeCallDefaults(name string, args map[string]string) map[string]string {
 	if token := hawkEyeContinuationToken(args); token != "" {
-		// HawkEye 1.0.7 rejects numeric cursors and extra fields on continuation.
+		// HawkEye 1.0.12 rejects numeric cursors and extra fields on continuation.
 		return map[string]string{"page_token": token}
 	}
 	copyArgs := make(map[string]string, len(args)+4)
@@ -645,7 +646,16 @@ func compactHawkEyeMCPOutput(name, output string) string {
 	if limit == 0 || len(output) <= limit {
 		return output
 	}
-	return output[:limit] + fmt.Sprintf("\n\n[DeepSentry HawkEye 上下文优化：%s 结果共 %d 字符，已保留前 %d；请用 browser_find 定位目标，或把 context.next_page_token 原样作为 page_token 单独继续。不要对 artifact 执行本地 grep/read_file]\n", name, len(output), limit)
+	// Preserve the appended continuation/error summary when trimming large text.
+	tail := ""
+	if i := strings.LastIndex(output, "\n[HawkEye 摘要]"); i >= 0 && len(output)-i < limit/2 {
+		tail = output[i:]
+		limit -= len(tail)
+	}
+	for limit > 0 && !utf8.RuneStart(output[limit]) {
+		limit--
+	}
+	return output[:limit] + tail + fmt.Sprintf("\n\n[DeepSentry HawkEye 上下文优化：%s 结果共 %d 字符，已保留前 %d；请用 browser_find 定位目标，或把 context.next_page_token 原样作为 page_token 单独继续。不要对 artifact 执行本地 grep/read_file]\n", name, len(output), limit)
 }
 
 func formatHawkEyeMCPContent(name string, contents []sdkmcp.Content, structured any, args map[string]string) string {

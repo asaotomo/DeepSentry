@@ -2,8 +2,28 @@ package analyzer
 
 import (
 	"ai-edr/internal/config"
+	"ai-edr/internal/harness/subagent"
+	"strings"
 	"testing"
 )
+
+func TestTaskSchemaListsRegisteredSubAgents(t *testing.T) {
+	definitions := AgentToolDefinitions()
+	for _, definition := range definitions {
+		if definition.Function.Name != "agent_action" {
+			continue
+		}
+		properties := definition.Function.Parameters["properties"].(map[string]interface{})
+		task := properties["task_name"].(map[string]string)
+		for _, name := range subagent.Names() {
+			if !strings.Contains(task["description"], name) {
+				t.Fatalf("native task schema does not expose %s", name)
+			}
+		}
+		return
+	}
+	t.Fatal("agent_action schema missing")
+}
 
 func TestAgentToolDefinitionsForCompactContextLimitsAndRanks(t *testing.T) {
 	definitions := AgentToolDefinitionsForContext(8, "请离线 analyze pcap 并检查 DNS 会话")
@@ -126,6 +146,29 @@ func TestDeferredToolRetrievalCoversOperationalSynonyms(t *testing.T) {
 		for _, name := range test.want {
 			if !seen[name] {
 				t.Errorf("query %q did not retrieve %s", test.query, name)
+			}
+		}
+	}
+}
+
+func TestDesktopFallbackDiscoveredWithoutDisplacingCLIWork(t *testing.T) {
+	for _, query := range []string{"帮我打开微信给DingDong发一个你好", "原生应用 UI自动化 辅助功能", "屏幕截图 操作电脑"} {
+		defs := AgentToolDefinitionsForContextWithPinned(1, query, nil)
+		found := false
+		for _, d := range defs {
+			if d.Function.Name == "computer_use" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("desktop fallback missing for %q", query)
+		}
+	}
+	for _, query := range []string{"统计日志错误数量", "检查磁盘空间", "通过微信API发送通知"} {
+		defs := AgentToolDefinitionsForContextWithPinned(1, query, nil)
+		for _, d := range defs {
+			if d.Function.Name == "computer_use" {
+				t.Fatalf("CLI task routed to desktop: %q", query)
 			}
 		}
 	}

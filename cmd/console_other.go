@@ -13,6 +13,8 @@ func enableWindowsANSI() {
 	// 空函数，仅为了兼容接口
 }
 
+func useSurveyConsoleInput() func() { return func() {} }
+
 func configureDetachedProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }

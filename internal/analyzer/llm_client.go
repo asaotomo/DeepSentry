@@ -2,6 +2,8 @@ package analyzer
 
 import (
 	"ai-edr/internal/config"
+	"ai-edr/internal/mcp"
+	deepsentrytools "ai-edr/internal/tools"
 	"bufio"
 	"bytes"
 	"context"
@@ -15,6 +17,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -94,6 +97,9 @@ func CallLLMWithRetryContext(ctx context.Context, messages []Message, useNativeT
 			}
 
 			result, err := callLLMOnce(ctx, cfg, messages, useNativeTools, onStream)
+			if err == nil && !hasActionableLLMOutput(result) {
+				err = errors.New("empty response: no content or tool call")
+			}
 			if err == nil {
 				result.ModelID = model.ID
 				result.Attempts = totalAttempts
@@ -121,8 +127,23 @@ func CallLLMWithRetryContext(ctx context.Context, messages []Message, useNativeT
 	return LLMResult{}, fmt.Errorf("LLM 调用失败(总尝试 %d 次): %w", totalAttempts, lastErr)
 }
 
+func hasActionableLLMOutput(result LLMResult) bool {
+	if strings.TrimSpace(result.Content) != "" || strings.TrimSpace(result.ToolCallName) != "" {
+		return true
+	}
+	for _, call := range result.ToolCalls {
+		if strings.TrimSpace(call.Name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func callLLMOnce(ctx context.Context, cfg config.Config, messages []Message, useNativeTools bool, onStream func(string)) (LLMResult, error) {
-	native := useNativeTools && cfg.IsOpenAICompatible() && !isAstraModel(cfg.ModelName)
+	native := useNativeTools && cfg.IsOpenAICompatible() && !isGPT6ReasoningModel(cfg.ModelName)
+	if native && isKnownUnsupported(cfg, "tools") {
+		native = false
+	}
 	if cfg.IsAnthropic() {
 		return callAnthropic(ctx, cfg, messages)
 	}
@@ -135,6 +156,9 @@ func callLLMOnce(ctx context.Context, cfg config.Config, messages []Message, use
 			result, err = callOpenAICompatible(ctx, cfg, messages, true, nil)
 		}
 		if err != nil && isToolsUnsupported(err) {
+			if explicitlyUnsupported(err, "tool") {
+				rememberUnsupported(cfg, "tools")
+			}
 			return callOpenAICompatible(ctx, cfg, messages, false, onStream)
 		}
 		return result, err
@@ -147,6 +171,52 @@ func callLLMOnce(ctx context.Context, cfg config.Config, messages []Message, use
 		return result, err
 	}
 	return callOpenAICompatible(ctx, cfg, messages, false, nil)
+}
+
+const unsupportedFeatureTTL = 5 * time.Minute
+
+type unsupportedFeatureKey struct {
+	url, model, feature string
+}
+
+var unsupportedFeatures sync.Map
+
+func featureKey(cfg config.Config, feature string) unsupportedFeatureKey {
+	return unsupportedFeatureKey{url: config.NormalizeChatURL(cfg.ApiURL), model: cfg.ModelName, feature: feature}
+}
+
+func isKnownUnsupported(cfg config.Config, feature string) bool {
+	key := featureKey(cfg, feature)
+	value, ok := unsupportedFeatures.Load(key)
+	if !ok {
+		return false
+	}
+	expires, ok := value.(time.Time)
+	if ok && time.Now().Before(expires) {
+		return true
+	}
+	unsupportedFeatures.CompareAndDelete(key, value)
+	return false
+}
+
+func rememberUnsupported(cfg config.Config, feature string) {
+	unsupportedFeatures.Store(featureKey(cfg, feature), time.Now().Add(unsupportedFeatureTTL))
+}
+
+func explicitlyUnsupported(err error, parameter string) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if !strings.Contains(message, parameter) {
+		return false
+	}
+	for _, marker := range []string{"unsupported", "not support", "unknown", "unrecognized", "not allowed", "invalid parameter", "extra inputs"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldFailover(cfg config.Config, err error) bool {
@@ -252,7 +322,7 @@ func callOpenAIResponses(ctx context.Context, cfg config.Config, messages []Mess
 		Temperature:     effectiveTemperature(cfg),
 		MaxOutputTokens: cfg.EffectiveModelCapabilities().ReservedOutputTokens,
 	}
-	if isAstraModel(cfg.ModelName) {
+	if isGPT6ReasoningModel(cfg.ModelName) {
 		reqBody.Temperature = 0
 	}
 	body, status, err := doHTTPPost(ctx, url, cfg, reqBody)
@@ -409,6 +479,9 @@ func callOpenAICompatible(ctx context.Context, cfg config.Config, messages []Mes
 		Temperature: effectiveTemperature(cfg),
 		MaxTokens:   cfg.EffectiveModelCapabilities().ReservedOutputTokens,
 	}
+	if isKnownUnsupported(cfg, "max_tokens") {
+		reqBody.MaxTokens = 0
+	}
 	if withTools {
 		reqBody.Tools = nativeToolDefinitionsForRequest(cfg, messages)
 		// auto lets the model select a strongly typed built-in function, while
@@ -417,13 +490,21 @@ func callOpenAICompatible(ctx context.Context, cfg config.Config, messages []Mes
 	}
 
 	if useStream {
-		reqBody.StreamOptions = &StreamOptions{IncludeUsage: true}
+		if !isKnownUnsupported(cfg, "stream_options") {
+			reqBody.StreamOptions = &StreamOptions{IncludeUsage: true}
+		}
 		result, err := callOpenAICompatibleStream(ctx, url, cfg, reqBody, onStream)
 		if err != nil && isStreamOptionsUnsupported(err) {
+			if explicitlyUnsupported(err, "stream_options") || explicitlyUnsupported(err, "include_usage") {
+				rememberUnsupported(cfg, "stream_options")
+			}
 			reqBody.StreamOptions = nil
 			result, err = callOpenAICompatibleStream(ctx, url, cfg, reqBody, onStream)
 		}
 		if err != nil && reqBody.MaxTokens > 0 && isMaxTokensUnsupported(err) {
+			if explicitlyUnsupported(err, "max_tokens") {
+				rememberUnsupported(cfg, "max_tokens")
+			}
 			reqBody.MaxTokens = 0
 			return callOpenAICompatibleStream(ctx, url, cfg, reqBody, onStream)
 		}
@@ -437,6 +518,9 @@ func callOpenAICompatible(ctx context.Context, cfg config.Config, messages []Mes
 	if status != 200 && reqBody.MaxTokens > 0 {
 		apiErr := fmt.Errorf("API Error %d: %s", status, truncateStr(string(body), 500))
 		if isMaxTokensUnsupported(apiErr) {
+			if explicitlyUnsupported(apiErr, "max_tokens") {
+				rememberUnsupported(cfg, "max_tokens")
+			}
 			reqBody.MaxTokens = 0
 			body, status, err = doHTTPPost(ctx, url, cfg, reqBody)
 			if err != nil {
@@ -485,14 +569,9 @@ func nativeToolDefinitionsForRequest(cfg config.Config, messages []Message) []To
 }
 
 func pinnedNativeToolNames(messages []Message) []string {
-	known := make(map[string]bool)
-	allNames := AgentToolDefinitionsForContext(0, "")
-	for _, definition := range allNames {
-		known[definition.Function.Name] = true
-	}
 	selected := make(map[string]bool)
 	for _, message := range messages {
-		if message.Role == "tool" && known[message.Name] && !alwaysVisibleNativeTool(message.Name) {
+		if message.Role == "tool" && isAvailableNativeTool(message.Name) {
 			selected[message.Name] = true
 		}
 		if message.Role != "system" {
@@ -510,7 +589,7 @@ func pinnedNativeToolNames(messages []Message) []string {
 			}
 			for _, name := range strings.Split(list, ",") {
 				name = strings.TrimSpace(name)
-				if known[name] && !alwaysVisibleNativeTool(name) {
+				if isAvailableNativeTool(name) {
 					selected[name] = true
 				}
 			}
@@ -522,6 +601,17 @@ func pinnedNativeToolNames(messages []Message) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func isAvailableNativeTool(name string) bool {
+	if name == "" || alwaysVisibleNativeTool(name) {
+		return false
+	}
+	if _, ok := deepsentrytools.Get(name); ok {
+		return true
+	}
+	_, _, ok := mcp.Global().Get(name)
+	return ok
 }
 
 type streamChunk struct {
@@ -634,8 +724,8 @@ func callOpenAICompatibleStream(ctx context.Context, url string, cfg config.Conf
 	if err := scanner.Err(); err != nil {
 		partialErr = fmt.Errorf("stream read error: %w", err)
 	}
-	if content.Len() == 0 && len(toolBuilders) == 0 {
-		return LLMResult{}, errors.New("empty stream response")
+	if strings.TrimSpace(content.String()) == "" && len(toolBuilders) == 0 {
+		return LLMResult{ReasoningContent: reasoningContent.String(), Usage: usage}, errors.New("empty response: no content or tool call")
 	}
 	indexes := make([]int, 0, len(toolBuilders))
 	for index := range toolBuilders {
@@ -837,6 +927,9 @@ func anthropicMaxTokens(cfg config.Config) int {
 }
 
 func anthropicEffort(model string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-opus-5-5") {
+		return "medium"
+	}
 	if anthropicUsesAdaptiveThinking(model) {
 		return "high"
 	}
@@ -1028,16 +1121,21 @@ func truncateHistoryFallbackToBudget(history *[]Message, keepRecent int, pinnedC
 	*history = append([]Message{contextMessage}, trimmed...)
 }
 
-func isAstraModel(model string) bool {
+func isGPT6ReasoningModel(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
-	return m == "gpt-6-astra" || strings.HasPrefix(m, "gpt-6-astra-20")
+	for _, id := range []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		if m == id || strings.HasPrefix(m, id+"-20") {
+			return true
+		}
+	}
+	return false
 }
 
-// Astra accepts Chat Completions for text, but rejects sampling parameters.
-// Keep other models' explicit temperature=0 behavior unchanged.
+// GPT-6 models default to reasoning; Chat Completions rejects sampling
+// parameters at non-none effort. Keep other models' temperature behavior.
 func (r ChatRequest) MarshalJSON() ([]byte, error) {
 	type plain ChatRequest
-	if !isAstraModel(r.Model) {
+	if !isGPT6ReasoningModel(r.Model) {
 		return json.Marshal(plain(r))
 	}
 	return json.Marshal(struct {

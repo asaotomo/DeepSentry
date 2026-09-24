@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -38,6 +39,51 @@ func TestCleanJSON_MixedResponse(t *testing.T) {
 	}
 	if prose == "" {
 		t.Fatal("expected prose")
+	}
+}
+
+func TestCleanJSONPreservesValidEscapedPipesAndPaths(t *testing.T) {
+	for _, raw := range []string{
+		`{"action":"execute","command":"grep a\\|b C:\\logs\\n.txt"}`,
+		`{"action":"tool","tool_args":{"path":"C:\\Users\\示例用户\\report.txt","pattern":"a\\|b"}}`,
+		`{"action":"tool","tool_args":{"path":"\\\\server\\share\\report.txt"}}`,
+	} {
+		got, _ := cleanJSON(raw)
+		if got != raw || !json.Valid([]byte(got)) {
+			t.Fatalf("valid JSON changed: got %q, want %q", got, raw)
+		}
+	}
+}
+
+func TestCleanJSONRepairsOnlyInvalidEscapesInStrings(t *testing.T) {
+	raw := `{"action":"execute","command":"grep a\|b C:\Users\示例用户\report.txt"}`
+	got, _ := cleanJSON(raw)
+	var decoded struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("repaired JSON invalid: %q: %v", got, err)
+	}
+	if want := `grep a\|b C:\Users\示例用户\report.txt`; decoded.Command != want {
+		t.Fatalf("command changed: got %q, want %q", decoded.Command, want)
+	}
+}
+
+func TestCleanJSONKeepsWindowsCommandPathsLiteral(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`{"command":"type C:\new\test.txt"}`, `type C:\new\test.txt`},
+		{`{"command":"Get-Content 'C:\Program Files\test.txt'; echo ok"}`, `Get-Content 'C:\Program Files\test.txt'; echo ok`},
+		{`{"command":"Get-Content \"C:\Program Files\test.txt\"; echo ok"}`, `Get-Content "C:\Program Files\test.txt"; echo ok`},
+		{`{"command":"type C:\\new\\test.txt"}`, `type C:\new\test.txt`},
+		{`{"command":"echo \"quoted\"; grep \d+"}`, `echo "quoted"; grep \d+`},
+	} {
+		got, _ := cleanJSON(tc.raw)
+		var decoded struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(got), &decoded); err != nil || decoded.Command != tc.want {
+			t.Fatalf("raw=%q clean=%q command=%q want=%q err=%v", tc.raw, got, decoded.Command, tc.want, err)
+		}
 	}
 }
 
@@ -108,6 +154,53 @@ func TestRecoverPlainTextSummaryWithRhetoricalQuestionsFinishes(t *testing.T) {
 	}
 	if resp.FinalReport != raw || resp.Question != "" {
 		t.Fatalf("summary should be preserved as final report: %#v", resp)
+	}
+}
+
+func TestFinalizeResponseExpandsEscapedReportNewlines(t *testing.T) {
+	raw := "授权边界先说清楚。\\n\\n## 下一步\\n- 核对书面授权\\n- 再决定能不能测\\n路径 C:\\notes 保持原样"
+	resp := finalizeResponse(AgentResponse{Action: "finish", IsFinished: true, FinalReport: raw})
+	if strings.Count(resp.FinalReport, `\n`) != 1 {
+		t.Fatalf("report newlines stayed escaped: %q", resp.FinalReport)
+	}
+	if !strings.Contains(resp.FinalReport, "\n\n## 下一步\n- 核对书面授权\n- 再决定能不能测\n") {
+		t.Fatalf("report was not split into paragraphs: %q", resp.FinalReport)
+	}
+	if !strings.Contains(resp.FinalReport, `C:\notes`) {
+		t.Fatalf("path was rewritten: %q", resp.FinalReport)
+	}
+}
+
+func TestUnescapeModelLineBreaksPreservesWindowsPathsAndCodeEscapes(t *testing.T) {
+	raw := "## 排查\\n- 查看 C:\\n1\\logs 和 C:\\t1\\logs\\n- 命令 `printf '\\n'`，保留 \\r 与 \\\" 引号"
+	got := UnescapeModelLineBreaks(raw)
+	if !strings.Contains(got, "## 排查\n- 查看 C:\\n1\\logs 和 C:\\t1\\logs\n- 命令") {
+		t.Fatalf("layout or paths changed unexpectedly: %q", got)
+	}
+	for _, literal := range []string{`printf '\n'`, `\r`, `\"`} {
+		if !strings.Contains(got, literal) {
+			t.Fatalf("literal %q was rewritten: %q", literal, got)
+		}
+	}
+}
+
+func TestUnescapeModelLineBreaksSingleMarkdownBoundary(t *testing.T) {
+	if got := UnescapeModelLineBreaks(`## 结论\n- 已完成`); got != "## 结论\n- 已完成" {
+		t.Fatalf("single escaped markdown boundary not expanded: %q", got)
+	}
+	if got := UnescapeModelLineBreaks(`C:\n1\logs`); got != `C:\n1\logs` {
+		t.Fatalf("single path segment changed: %q", got)
+	}
+	if got := UnescapeModelLineBreaks(`C:\n- report`); got != `C:\n- report` {
+		t.Fatalf("path resembling a list boundary changed: %q", got)
+	}
+}
+
+func TestUnescapeModelLineBreaksPreservesInlineCode(t *testing.T) {
+	raw := "## 示例\\n- 正则 `\\n- ` 应保持原样\\n- 下一项"
+	got := UnescapeModelLineBreaks(raw)
+	if got != "## 示例\n- 正则 `\\n- ` 应保持原样\n- 下一项" {
+		t.Fatalf("inline code escape changed: %q", got)
 	}
 }
 
@@ -184,10 +277,33 @@ func TestFinalizeResponseNormalizesThinkAlias(t *testing.T) {
 	}
 }
 
-func TestDecodeJSONUnicodeEscapesInCommand(t *testing.T) {
-	got := decodeJSONUnicodeEscapes(`chmod +x /opt/scripts/cpu_monitor.sh \u0026\u0026 ls -la /opt/scripts/cpu_monitor.sh`)
-	if got != "chmod +x /opt/scripts/cpu_monitor.sh && ls -la /opt/scripts/cpu_monitor.sh" {
-		t.Fatalf("unexpected command: %q", got)
+func TestExtractCommandStringDecodesJSONOnce(t *testing.T) {
+	raw := `{"action":"execute","command":"echo C:\\u0041 \u0026 \uD83D\uDE00",`
+	got, ok := extractCommandString(raw)
+	if !ok || got != `echo C:\u0041 & 😀` {
+		t.Fatalf("fallback command decoded incorrectly: %q ok=%t", got, ok)
+	}
+}
+
+func TestParseToolCallResponsePreservesLiteralUnicodeEscapeInCommand(t *testing.T) {
+	raw := `{"action":"execute","command":"echo C:\\Users\\u0041 \\u0026"}`
+	resp, err := ParseToolCallResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Command != `echo C:\Users\u0041 \u0026` {
+		t.Fatalf("valid JSON command was decoded twice: %q", resp.Command)
+	}
+}
+
+func TestNativeToolCallsPreserveRawWindowsPaths(t *testing.T) {
+	response, err := ParseToolCallResponse(`{"action":"execute","command":"type C:\new\test.txt"}`)
+	if err != nil || response.Command != `type C:\new\test.txt` {
+		t.Fatalf("agent action path changed: %q %v", response.Command, err)
+	}
+	tool, err := ParseNamedToolCall("file_tail", `{"path":"C:\Users\示例用户\report.txt","lines":5}`)
+	if err != nil || tool.ToolArgs["path"] != `C:\Users\示例用户\report.txt` {
+		t.Fatalf("named tool path changed: %#v %v", tool.ToolArgs, err)
 	}
 }
 

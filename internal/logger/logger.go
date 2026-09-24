@@ -9,15 +9,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
 
 // Reporter 负责生成审计报告
 type Reporter struct {
-	file  *os.File
-	path  string
-	title string
+	mu           sync.Mutex
+	file         *os.File
+	evidence     *os.File
+	path         string
+	evidencePath string
+	title        string
+	sequence     int
+	previousHash string
+	seenUserIDs  map[string]bool
+	sawFinal     bool
+	userTurns    int
+	actions      int
+	highRisk     int
+	mediumRisk   int
+	lowRisk      int
+	denied       int
+	blocked      int
+	failures     int
 }
 
 // NewReporter 创建一个新的审计报告文件
@@ -51,12 +67,27 @@ func NewReporterWithTitle(title string) (*Reporter, string, error) {
 		return nil, "", fmt.Errorf("无法创建报告文件: %v", err)
 	}
 	fullPath = actualPath
+	evidencePath := strings.TrimSuffix(fullPath, filepath.Ext(fullPath)) + ".evidence.jsonl"
+	// The evidence journal is part of the report, not optional telemetry.
+	// Never claim a report was created if its append-only archive is unavailable.
+	// #nosec G703 -- Same operator-selected report path as above; the evidence suffix cannot introduce a new directory and permissions are fixed to 0600.
+	evidenceFile, err := os.OpenFile(evidencePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		_ = file.Close()
+		return nil, "", fmt.Errorf("无法创建证据档案: %w", err)
+	}
+	if err := evidenceFile.Chmod(0o600); err != nil {
+		_ = evidenceFile.Close()
+		_ = file.Close()
+		return nil, "", fmt.Errorf("无法收紧证据档案权限: %w", err)
+	}
 
 	// 🟢 [核心修复] 写入 UTF-8 BOM (Byte Order Mark)
 	// Windows 的记事本和部分编辑器在打开没有 BOM 的 UTF-8 文件时，
 	// 可能会错误地将其识别为 GBK 编码，导致中文显示为乱码。
 	// 写入这三个字节 (\xEF\xBB\xBF) 可以显式声明文件为 UTF-8 编码。
 	if _, err := file.WriteString("\xEF\xBB\xBF"); err != nil {
+		_ = evidenceFile.Close()
 		_ = file.Close()
 		return nil, "", fmt.Errorf("写入报告 BOM 失败: %v", err)
 	}
@@ -66,22 +97,26 @@ func NewReporterWithTitle(title string) (*Reporter, string, error) {
 	header := fmt.Sprintf("# %s\n\n"+
 		"- **启动时间**: %s\n"+
 		"- **操作员**: %s\n"+
-		"- **工具版本**: v%s Ultimate\n\n"+
+		"- **工具版本**: v%s Ultimate\n"+
+		"- **证据档案**: `%s`（脱敏后的逐步记录；SHA256 链校验）\n"+
+		"- **证据边界**: 保存运行器实际返回的内容；上游截断、未采集和脱敏信息不能当作完整原始证据。\n\n"+
 		"---\n\n",
 		title,
 		time.Now().Format("2006-01-02 15:04:05"),
 		currentUser(),
 		ui.Version,
+		filepath.Base(evidencePath),
 	)
 	if _, err := file.WriteString(header); err != nil {
+		_ = evidenceFile.Close()
 		_ = file.Close()
 		return nil, "", fmt.Errorf("写入报告头失败: %v", err)
 	}
 
 	return &Reporter{
-		file:  file,
-		path:  fullPath,
-		title: title,
+		file: file, evidence: evidenceFile, path: fullPath,
+		evidencePath: evidencePath, title: title,
+		seenUserIDs: make(map[string]bool),
 	}, fullPath, nil
 }
 
@@ -192,7 +227,12 @@ func hasReportLikeSuffix(s string) bool {
 
 // SetTitle 更新报告第一行标题。TUI 首屏等待用户输入任务时，报告可在任务开始后再重命名。
 func (r *Reporter) SetTitle(title string) error {
-	if r == nil || r.file == nil || r.path == "" {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file == nil || r.path == "" {
 		return nil
 	}
 	title = NormalizeReportTitle(title)
@@ -243,6 +283,8 @@ func (r *Reporter) SetTitle(title string) error {
 
 // Log 记录常规思考和日志
 func (r *Reporter) Log(title, content string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.file == nil {
 		return
 	}
@@ -260,6 +302,8 @@ func (r *Reporter) Log(title, content string) {
 
 // LogCommand 专门记录命令执行
 func (r *Reporter) LogCommand(cmd, output string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.file == nil {
 		return
 	}
@@ -321,6 +365,23 @@ func safeUTF8Prefix(s string, maxBytes int) string {
 
 // Close 关闭文件句柄
 func (r *Reporter) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file != nil && r.evidence != nil {
+		_, _ = fmt.Fprintf(r.file, "\n---\n\n## 风险与溯源\n\n"+
+			"- 用户原话 %d 条，执行或询问 %d 次。高风险 %d，中风险 %d，低风险 %d。拒绝 %d，守卫拦截 %d，失败或空结果 %d。\n"+
+			"- 证据档案 `%s` 共 %d 条。末条 SHA256 `%s`。删除或改写任一条都会使后续链式校验失败。\n"+
+			"- 报告只保留可读摘要。完整脱敏返回在证据档案；上游工具自己截断的内容、未执行的步骤和已脱敏字段都不能回推出原文。\n"+
+			"- 公开转发前再人工核对高风险步骤、目标地址和截图。\n",
+			r.userTurns, r.actions, r.highRisk, r.mediumRisk, r.lowRisk, r.denied, r.blocked, r.failures,
+			filepath.Base(r.evidencePath), r.sequence, r.previousHash)
+		_ = r.file.Sync()
+	}
+	if r.evidence != nil {
+		_ = r.evidence.Sync()
+		_ = r.evidence.Close()
+		r.evidence = nil
+	}
 	if r.file != nil {
 		r.file.Close()
 		r.file = nil

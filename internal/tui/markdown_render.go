@@ -6,6 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"ai-edr/internal/analyzer"
 	"ai-edr/internal/ui"
 
 	"github.com/charmbracelet/lipgloss"
@@ -61,6 +62,7 @@ func renderMarkdownConfirm(markdown, timestamp string, width int) string {
 }
 
 func renderMarkdownBlocks(markdown string, width int) string {
+	markdown = analyzer.UnescapeModelLineBreaks(markdown)
 	markdown = sanitizeTUIText(markdown)
 	markdown = strings.ReplaceAll(markdown, "\r\n", "\n")
 	markdown = strings.ReplaceAll(markdown, "\r", "\n")

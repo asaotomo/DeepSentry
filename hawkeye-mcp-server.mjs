@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Hx0 HawkEye MCP Server v1.0.7
+ * Hx0 HawkEye MCP Server v1.0.12
  *
  * Zero-dependency local bridge:
  *   Any MCP host --stdio / Streamable HTTP / legacy SSE--> this process
@@ -16,13 +16,13 @@ import path from 'node:path';
 import process from 'node:process';
 
 const SERVER_NAME = 'hx0-hawkeye-mcp';
-const SERVER_VERSION = '1.0.7';
-const SEARCH_OPERATOR_GUIDE = 'When the user request is specific, or more public evidence is needed to finish the task, you MUST use Google-style search operators in browser_search/browser_research as a problem-solving step. Do not send bare keywords. Triggers: official/full names, a known site, file types (pdf/doc/xls), year/number ranges, excluding noise, unknown missing words, alternate names. Operators: "exact phrase"; " -term" (space before minus, none after); site:domain; filetype:pdf|doc|xls|ppt; * wildcard; intitle:/allintitle:; inurl:; uppercase OR or |; 2020..2025. Google also related:, cache:, define: (Baidu usually lacks related:). Combine to solve the question, e.g. "official title" filetype:pdf site:gov.cn. Also exactMatch, includeDomains, excludeDomains, timeRange. If the first page is noisy or incomplete, rewrite operators and search again. When general results are thin, also search well-known forums with site: zhihu.com, hupu.com, tieba.baidu.com, reddit.com, v2ex.com, github.com. For security, CVE, malware, or IOC questions, also check public threat-intel and vendor centers: threatbook.cn, x.threatbook.com, ti.360.net, ti.qianxin.com, nti.nsfocus.com, virustotal.com, freebuf.com. Example: keyword site:zhihu.com ; CVE-xxxx site:threatbook.cn. Use public pages only and cite the source.';
+const SERVER_VERSION = '1.0.12';
+const SEARCH_OPERATOR_GUIDE = 'When the user request is specific, or more public evidence is needed to finish the task, you MUST use Google-style search operators in browser_search/browser_research as a problem-solving step. Do not send bare keywords. Triggers: official/full names, a known site, file types (pdf/doc/xls), year/number ranges, excluding noise, unknown missing words, alternate names. Operators: "exact phrase"; " -term" (space before minus, none after); site:domain; filetype:pdf|doc|xls|ppt; * wildcard; intitle:/allintitle:; inurl:; uppercase OR or |; 2020..2025. Operator support varies by engine; relax overly strict syntax after empty results while preserving explicit user constraints. Combine to solve the question, e.g. "official title" filetype:pdf site:gov.cn. Also exactMatch, includeDomains, excludeDomains, timeRange. If the first page is noisy or incomplete, rewrite operators and search again. When general results are thin, also search well-known forums with site: zhihu.com, hupu.com, tieba.baidu.com, reddit.com, v2ex.com, github.com. For security, CVE, malware, or IOC questions, also check public threat-intel and vendor centers: threatbook.cn, x.threatbook.com, ti.360.net, ti.qianxin.com, nti.nsfocus.com, virustotal.com, freebuf.com. Example: keyword site:zhihu.com ; CVE-xxxx site:threatbook.cn. Use public pages only and cite the source. Smart search: query is the main question and queries adds distinct evidence variants; includeDomains means any listed domain. Prefer primary sources and read bodies with maxFetches or browser_research before verification claims. evidenceScore is retrieval relevance, not truth. Never cite challenge pages as evidence; disclose blockedByChallenge, degraded engines, stale cache and missing sources. Rewrite the query or change engines when evidence is insufficient.';
 const DEFAULT_WS_PORT = 19016;
 const WS_PATH = '/hx0-mcp';
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const TOOL_TIMEOUT_MS = 35_000;
-const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-11-25', '2025-06-18']);
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']);
 const LATEST_PROTOCOL_VERSION = '2025-11-25';
 const MAX_PENDING_CALLS = 16;
 const MAX_WS_MESSAGE_BYTES = 32 * 1024 * 1024;
@@ -51,12 +51,7 @@ function normalizeNativeKeyRequest(request) {
   if (!raw || raw.length > 80) throw new Error('Invalid native key');
   const parts = raw === '+' ? ['+'] : raw.split('+').map((item) => item.trim()).filter(Boolean);
   let key = parts.pop() || raw;
-  const modifiers = {
-    shift: row.shiftKey === true,
-    control: row.ctrlKey === true || row.controlKey === true,
-    alt: row.altKey === true,
-    meta: row.metaKey === true,
-  };
+  const modifiers = { shift: row.shiftKey === true, control: row.ctrlKey === true || row.controlKey === true, alt: row.altKey === true, meta: row.metaKey === true };
   for (const part of parts) {
     const lower = part.toLowerCase();
     if (lower === 'shift') modifiers.shift = true;
@@ -73,13 +68,74 @@ function normalizeNativeKeyRequest(request) {
   return { key, modifiers };
 }
 
+async function dispatchMacBrowserInput(request, action, signal) {
+  if (!request || request.browserFamily !== 'firefox') {
+    await execNativeInput('/usr/bin/osascript', ['-e', 'tell application "System Events" to ' + action], { signal });
+    return 'current_frontmost';
+  }
+  const targetTitle = String(request.windowTitle || '').trim().slice(0, 240);
+  const allowedApplicationIds = new Set(['org.mozilla.firefox', 'org.mozilla.firefoxdeveloperedition', 'org.mozilla.nightly']);
+  const configuredApplicationId = String(process.env.HX0_MCP_MAC_BROWSER_APP_ID || '').trim();
+  const applicationId = allowedApplicationIds.has(configuredApplicationId) ? configuredApplicationId : '';
+  const preferredApplication = applicationId ? [
+    'tell application id "' + applicationId + '" to activate',
+    'delay 0.12',
+    'tell application "System Events"',
+    action,
+    'end tell',
+    'return "app_id:' + applicationId + '"',
+  ] : [];
+  const script = [
+    'on run argv',
+    'set targetTitle to ""',
+    'if (count of argv) > 0 then set targetTitle to item 1 of argv',
+    ...preferredApplication,
+    'tell application "System Events"',
+    'set browserProcesses to every application process whose bundle identifier starts with "org.mozilla.firefox"',
+    'set browserProcesses to browserProcesses & (every application process whose bundle identifier starts with "org.mozilla.nightly")',
+    'set browserProcesses to browserProcesses & (every application process whose name is "firefox")',
+    'set browserProcesses to browserProcesses & (every application process whose name starts with "Firefox")',
+    'if (count of browserProcesses) is 0 then error "Firefox is not running"',
+    'if targetTitle is not "" then',
+    'repeat with candidateProcess in browserProcesses',
+    'repeat with candidateWindow in windows of candidateProcess',
+    'try',
+    'if (name of candidateWindow contains targetTitle) then',
+    'set frontmost of candidateProcess to true',
+    'perform action "AXRaise" of candidateWindow',
+    'delay 0.12',
+    action,
+    'return "matched:" & targetTitle',
+    'end if',
+    'end try',
+    'end repeat',
+    'end repeat',
+    'end if',
+    'repeat with candidateProcess in browserProcesses',
+    'try',
+    'if (count of windows of candidateProcess) > 0 then',
+    'set frontmost of candidateProcess to true',
+    'perform action "AXRaise" of front window of candidateProcess',
+    'delay 0.12',
+    action,
+    'return "fallback:" & targetTitle',
+    'end if',
+    'end try',
+    'end repeat',
+    'error "No Firefox browser window is available"',
+    'end tell',
+    'end run',
+  ].join('\n');
+  return execNativeInput('/usr/bin/osascript', ['-e', script, '--', targetTitle], { signal });
+}
+
 async function dispatchMacNativeInput(request, signal) {
   if (request.kind === 'mouse') {
     const x = Math.round(Number(request.x));
     const y = Math.round(Number(request.y));
     if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000) throw new Error('Invalid native mouse coordinates');
-    await execNativeInput('/usr/bin/osascript', ['-e', 'tell application "System Events" to click at {' + x + ', ' + y + '}'], { signal });
-    return { ok: true, backend: 'macos_system_events', kind: 'mouse', action: 'click', x, y };
+    const focusTarget = await dispatchMacBrowserInput(request, 'click at {' + x + ', ' + y + '}', signal);
+    return { ok: true, backend: 'macos_system_events', focusTarget, kind: 'mouse', action: 'click', x, y };
   }
   const normalized = normalizeNativeKeyRequest(request);
   const keyCodes = { Enter: 36, Tab: 48, Space: 49, Backspace: 51, Escape: 53, Meta: 55, Shift: 56, Alt: 58, Control: 59, F1: 122, F2: 120, F3: 99, F4: 118, F5: 96, F6: 97, F7: 98, F8: 100, F9: 101, F10: 109, F11: 103, F12: 111, Home: 115, PageUp: 116, Delete: 117, End: 119, PageDown: 121, ArrowLeft: 123, ArrowRight: 124, ArrowDown: 125, ArrowUp: 126 };
@@ -93,8 +149,8 @@ async function dispatchMacNativeInput(request, signal) {
   if (Object.prototype.hasOwnProperty.call(keyCodes, normalized.key)) action = 'key code ' + keyCodes[normalized.key] + usingClause;
   else if (normalized.key.length === 1) action = 'keystroke ' + JSON.stringify(normalized.key.toLowerCase()) + usingClause;
   else throw new Error('Unsupported native key on macOS: ' + normalized.key);
-  await execNativeInput('/usr/bin/osascript', ['-e', 'tell application "System Events" to ' + action], { signal });
-  return { ok: true, backend: 'macos_system_events', kind: 'key', key: normalized.key, modifiers: normalized.modifiers };
+  const focusTarget = await dispatchMacBrowserInput(request, action, signal);
+  return { ok: true, backend: 'macos_system_events', focusTarget, kind: 'key', key: normalized.key, modifiers: normalized.modifiers };
 }
 
 async function dispatchLinuxNativeInput(request, signal) {
@@ -164,27 +220,21 @@ async function completeNativeInput(tool, preparedInput, result, signal, hostId) 
     }
     return result;
   }
+  let inputDispatched = false;
   try {
     signal?.throwIfAborted();
     const nativeInput = await dispatchNativeInputRequest(request, signal);
+    inputDispatched = true;
     await new Promise((resolve) => setTimeout(resolve, 160));
-    const finalized = await callExtension('browser_native_input_finalize', {
-      tabId: result.tabId,
-      frameId: result.frameId,
-      probeToken: result.probeToken,
-    }, { signal, hostId });
-    const merged = Object.assign({}, result, finalized || {}, {
-      ok: true,
-      inputMode: request.kind === 'key' ? 'native_os_key' : 'native_os_mouse',
-      input_mode: request.kind === 'key' ? 'native_os_key' : 'native_os_mouse',
-      inputModes: [request.kind === 'key' ? 'native_os_key' : 'native_os_mouse'],
-      nativeInput,
-    });
+    const finalized = await callExtension('browser_native_input_finalize', { tabId: result.tabId, frameId: result.frameId, probeToken: result.probeToken }, { signal, hostId });
+    if (!finalized || typeof finalized !== 'object') throw new Error('No native input verification result');
+    const merged = Object.assign({}, result, finalized || {}, { ok: finalized?.ok !== false, inputDispatched: true, outcomeVerified: false, inputMode: request.kind === 'key' ? 'native_os_key' : 'native_os_mouse', input_mode: request.kind === 'key' ? 'native_os_key' : 'native_os_mouse', inputModes: [request.kind === 'key' ? 'native_os_key' : 'native_os_mouse'], nativeInput });
     delete merged.nativeInputRequest;
     delete merged.probeToken;
     return merged;
   } catch (error) {
     signal?.throwIfAborted();
+    if (inputDispatched) return { ok: false, inputDispatched: true, outcomeVerified: false, category: 'input_verification_failed', error: String(error && error.message || error), hint: 'Input was already sent. Inspect the page before retrying to avoid duplicate actions.' };
     const mode = String(preparedInput && (preparedInput.inputMode || preparedInput.input_mode || preparedInput.clickMode || preparedInput.click_mode) || 'auto').toLowerCase();
     if (mode === 'auto') {
       const fallbackInput = Object.assign({}, preparedInput, tool === 'browser_click' ? { clickMode: 'js' } : { inputMode: 'js' });
@@ -222,6 +272,9 @@ if (process.argv.includes('--help')) {
     'as a stdio MCP server in any MCP client. HTTP-capable hosts may connect to:',
     '  Streamable HTTP: http://127.0.0.1:19016/mcp',
     '  Legacy SSE:      http://127.0.0.1:19016/sse',
+    'Use --keep-alive for an HTTP-only service with closed stdin.',
+    'Chrome and Firefox use this same file. HX0_MCP_BROWSER=chrome|firefox optionally pins a browser.',
+    'Without a preference the first ready browser stays active; others remain on standby until it disconnects.',
     '',
   ].join('\n'));
   process.exit(0);
@@ -230,7 +283,7 @@ if (process.argv.includes('--help')) {
 const TOOLS = [
   {
     name: 'browser_navigate',
-    description: 'Navigate the HawkEye-connected real browser tab to an HTTP(S) URL and return a fresh accessibility snapshot. Private/lab hosts (RFC1918, localhost, link-local) with a self-signed or otherwise untrusted certificate are auto-proceeded past the browser interstitial (Chrome: Advanced → Proceed; Firefox: Accept the Risk). The address bar may still show Not secure; use browser_security for diagnosis. Public-site certificate warnings are not auto-proceeded.',
+    description: 'Navigate the HawkEye-connected real browser tab to an HTTP(S) URL and return a bounded page preview. Private/lab hosts (RFC1918, localhost, link-local) with a self-signed or otherwise untrusted certificate are auto-proceeded past the browser interstitial (Chrome: Advanced → Proceed; Firefox: Accept the Risk). The address bar may still show Not secure; use browser_security for diagnosis. Public-site certificate warnings are not auto-proceeded.',
     inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'Absolute or current-page-relative HTTP(S) URL.' } }, required: ['url'], additionalProperties: false },
   },
   {
@@ -275,8 +328,8 @@ const TOOLS = [
   },
   {
     name: 'browser_click',
-    description: 'Click the smallest real interactive target (inner a/button, not a wrapping card). Auto prefers focused CDP pointer input so activation-gated APIs work, then safely falls back to JS when trusted input is unavailable. trusted never silently degrades to synthetic JS. Returns eventEvidence/userActivationObserved when measurable. Prefer a ref/stableId. For dropdown values use browser_select_option.',
-    inputSchema: { type: 'object', properties: { element: { type: 'string', description: 'Human-readable description only; it is not exact-match text.' }, text: { type: 'string', description: 'Authoritative accessible text. Required when exact=true.' }, exact: { type: 'boolean', description: 'Exact accessible-name match; folds whitespace only and is case-sensitive by default.' }, caseSensitive: { type: 'boolean', description: 'Override text case sensitivity.' }, clickMode: { type: 'string', enum: ['auto', 'js', 'trusted'], description: 'auto prefers real CDP pointer input and falls back to JS; js forces synthetic DOM activation; trusted requires CDP pointer input and fails closed.' }, stableId: { type: 'string', description: 'Stable business id returned by browser_snapshot, such as data-challenge-id:42 or route-id:42.' }, ref: { type: 'string', description: 'Element ref from browser_snapshot.' }, selector: { type: 'string', description: 'Optional CSS selector fallback.' } }, additionalProperties: false },
+    description: 'Click the smallest real interactive target (inner a/button, not a wrapping card). Auto uses Chrome CDP or the Firefox bundled local native-input relay so activation-gated APIs receive a real OS pointer event, then falls back to JS if native input is unavailable. trusted/native fail closed. Returns eventEvidence/userActivationObserved when measurable. Input delivery does not prove fullscreen, playback or navigation succeeded; verify the resulting page state.',
+    inputSchema: { type: 'object', properties: { element: { type: 'string', description: 'Human-readable description only; it is not exact-match text.' }, text: { type: 'string', description: 'Authoritative accessible text. Required when exact=true.' }, exact: { type: 'boolean', description: 'Exact accessible-name match; folds whitespace only and is case-sensitive by default.' }, caseSensitive: { type: 'boolean', description: 'Override text case sensitivity.' }, clickMode: { type: 'string', enum: ['auto', 'js', 'trusted', 'native'], description: 'auto prefers browser-supported trusted input and falls back to JS; trusted/native require trusted input; js sends a synthetic DOM click.' }, stableId: { type: 'string', description: 'Stable business id returned by browser_snapshot, such as data-challenge-id:42 or route-id:42.' }, ref: { type: 'string', description: 'Element ref from browser_snapshot.' }, selector: { type: 'string', description: 'Optional CSS selector fallback.' } }, additionalProperties: false },
   },
   {
     name: 'browser_hover',
@@ -295,8 +348,8 @@ const TOOLS = [
   },
   {
     name: 'browser_press_key',
-    description: 'Send a key such as f, Enter, Tab, Escape, ArrowDown, or Ctrl+L to the focused or referenced element. Auto prefers focused CDP Input.dispatchKeyEvent so activation-gated APIs work; trusted fails closed instead of silently emitting synthetic DOM events.',
-    inputSchema: { type: 'object', properties: { key: { type: 'string' }, element: { type: 'string' }, ref: { type: 'string' }, selector: { type: 'string' }, inputMode: { type: 'string', enum: ['auto', 'js', 'trusted'], description: 'auto prefers CDP and falls back to JS; trusted requires CDP; js sends synthetic DOM KeyboardEvents.' }, shiftKey: { type: 'boolean' }, ctrlKey: { type: 'boolean' }, altKey: { type: 'boolean' }, metaKey: { type: 'boolean' } }, required: ['key'], additionalProperties: false },
+    description: 'Send a key such as f, Enter, Tab, Escape, ArrowDown, or Ctrl+L. Auto uses Chrome CDP or the Firefox bundled local native-input relay so activation-gated APIs receive a real OS keyboard event; trusted/native fail closed rather than silently emitting synthetic DOM events. Input delivery does not prove fullscreen or playback succeeded; verify the resulting page state.',
+    inputSchema: { type: 'object', properties: { key: { type: 'string' }, element: { type: 'string' }, ref: { type: 'string' }, selector: { type: 'string' }, inputMode: { type: 'string', enum: ['auto', 'js', 'trusted', 'native'], description: 'auto prefers browser-supported trusted input and falls back to JS; trusted/native require trusted input; js sends synthetic DOM KeyboardEvents.' }, shiftKey: { type: 'boolean' }, ctrlKey: { type: 'boolean' }, altKey: { type: 'boolean' }, metaKey: { type: 'boolean' } }, required: ['key'], additionalProperties: false },
   },
   {
     name: 'browser_wait',
@@ -348,7 +401,7 @@ const TOOLS = [
   },
   {
     name: 'browser_wait_for',
-    description: 'Wait until page readiness, URL text, visible/hidden element state, or page text matches, then return a snapshot.',
+    description: 'Wait until page readiness, URL text, visible/hidden element state, or page text matches, then return the wait result.',
     inputSchema: { type: 'object', properties: { ref: { type: 'string' }, selector: { type: 'string' }, element: { type: 'string' }, text: { type: 'string' }, urlContains: { type: 'string' }, state: { type: 'string', enum: ['visible', 'hidden', 'attached', 'detached'] }, timeoutMs: { type: 'integer', minimum: 100, maximum: 30000 }, pollMs: { type: 'integer', minimum: 50, maximum: 2000 } }, additionalProperties: false },
   },
   {
@@ -404,7 +457,7 @@ const TOOLS = [
   },
   {
     name: 'browser_read_text',
-    description: 'Extract cleaned, human-readable text from the connected page or a specific container, including open Shadow DOM and injectable iframes. Use to read long articles, documentation, or page source that the accessibility snapshot condenses. Large results use cursor-based context chunks.',
+    description: 'Extract cleaned, human-readable text from the connected page or a specific container, including open Shadow DOM and injectable iframes. Use to read long articles, documentation, or page source that the accessibility snapshot condenses. Returns the current text chunk in value, with text_length for the full extraction and context.next_page_token for immutable continuation pages.',
     inputSchema: { type: 'object', properties: { selector: { type: 'string', description: 'Optional CSS selector to scope extraction; defaults to the main/article/body content.' }, maxChars: { type: 'integer', minimum: 1000, maximum: 400000, description: 'Maximum characters to extract from the page.' }, context_budget_chars: { type: 'integer', minimum: 12000, maximum: 400000, description: 'Maximum text characters returned in this context chunk.' }, cursor: { type: 'integer', minimum: 0, description: 'Character cursor returned by a previous chunk.' } }, additionalProperties: false },
   },
   {
@@ -516,6 +569,18 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['enable', 'disable', 'status', 'queue', 'release', 'drop', 'release_all'] }, id: { type: 'string', description: 'Paused record id from action=queue (for release/drop).' }, payload: { type: 'object', description: 'Optional modifications when releasing: url, method, requestHeaders, requestBody, statusCode, responseHeaders, responseBody.', additionalProperties: true }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, required: ['action'], additionalProperties: true },
   },
 ];
+
+TOOLS.find((tool) => tool.name === 'hawkeye_evaluate').inputSchema.properties.include_logs = { type: 'boolean', description: 'Include captured console logs. Defaults to false; execution errors are always preserved. Use browser_get_console_logs for page console inspection.' };
+TOOLS.find((tool) => tool.name === 'browser_navigate').inputSchema.properties.include_snapshot = { type: 'boolean', description: 'Include the full post-navigation snapshot and elements. Defaults to a bounded preview with refs. Use browser_find or browser_snapshot for details without navigating again.' };
+TOOLS.find((tool) => tool.name === 'hawkeye_evaluate').description += ' Console logs are omitted by default; include_logs=true opts in.';
+TOOLS.find((tool) => tool.name === 'browser_navigate').description += ' Default output is a bounded page preview; include_snapshot=true restores the full observation.';
+
+const ACTION_RECEIPT_TOOLS = new Set(['browser_click', 'browser_type', 'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_wait', 'browser_wait_for']);
+for (const tool of TOOLS) {
+  if (!ACTION_RECEIPT_TOOLS.has(tool.name)) continue;
+  tool.inputSchema.properties.include_elements = { type: 'boolean', description: 'Include the post-action page snapshot and element list. Defaults to false. Prefer browser_snapshot for a separate observation; never repeat an action just to fetch its page details.' };
+  tool.description += ' Returns a concise action receipt by default, retaining outcome and input evidence. Set include_elements=true to include the post-action snapshot and elements.';
+}
 
 const READ_ONLY_TOOLS = new Set(['browser_snapshot', 'browser_find', 'browser_search', 'browser_fetch', 'browser_research', 'browser_exam_questions', 'browser_read_text', 'browser_get_console_logs', 'browser_wait', 'browser_wait_for', 'hawkeye_capture_state', 'hawkeye_capture_history', 'hawkeye_capture_inspect', 'hawkeye_request_get', 'hawkeye_request_mutate', 'hawkeye_response_compare', 'hawkeye_codec', 'hawkeye_script_list', 'hawkeye_sensitive_scan', 'hawkeye_darklink_scan']);
 const CLOSED_WORLD_TOOLS = new Set(['hawkeye_capture_start', 'hawkeye_capture_stop', 'hawkeye_capture_state', 'hawkeye_capture_history', 'hawkeye_capture_inspect', 'hawkeye_request_get', 'hawkeye_request_mutate', 'hawkeye_response_compare', 'hawkeye_scope', 'hawkeye_findings', 'hawkeye_codec', 'hawkeye_script_list', 'hawkeye_sensitive_scan']);
@@ -633,6 +698,32 @@ for (const tool of TOOLS) {
 const TOOL_PROFILE = resolveToolProfile();
 const ENABLED_TOOL_NAMES = new Set(TOOL_PROFILE.tools.map((tool) => tool.name));
 
+// Model providers accept a narrower vocabulary than MCP's JSON Schema contract.
+// Keep the executable schemas above intact; publish a simple object at the root.
+// Root fields must be optional because page_token alone is a valid continuation.
+// Build once, rather than cloning 51 schemas on each tools/list request.
+function publicToolDefinition(tool) {
+  const schema = JSON.parse(JSON.stringify(tool.inputSchema));
+  const requirements = schema.anyOf[0];
+  for (const key of ['required', 'anyOf', 'oneOf', 'allOf', 'not', 'if', 'then', 'else']) delete schema[key];
+  for (const key of requirements.required || []) {
+    const property = schema.properties[key];
+    property.description = 'Required for a fresh call; omit when using page_token. ' + (property.description || '');
+  }
+  const alternatives = tool.name === 'browser_find' ? 'Fresh calls require exactly one of text or regex.'
+    : tool.name === 'browser_search' ? 'Fresh calls require query or queries.' : '';
+  const required = requirements.required?.length ? 'Fresh calls require: ' + requirements.required.join(', ') + '.' : '';
+  return { ...tool, description: [tool.description, required, alternatives].filter(Boolean).join(' '), inputSchema: schema };
+}
+const PUBLIC_TOOLS = TOOL_PROFILE.tools.map(publicToolDefinition);
+const LEGACY_PUBLIC_TOOLS = PUBLIC_TOOLS.map(({ annotations, ...tool }) => tool);
+function compatibleToolResult(content, context) {
+  if (context.protocolVersion >= '2025-06-18') return content;
+  const { structuredContent, ...legacy } = content;
+  return legacy;
+}
+
+
 const SNAPSHOT_TTL_MS = 120_000;
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_CACHE_BYTES = 32 * 1024 * 1024;
@@ -674,7 +765,12 @@ function renderResultPage(entry, offset) {
     if (!token) { token = crypto.randomBytes(24).toString('base64url'); entry.tokens.set(end, token); snapshotTokens.set(token, { id: entry.id, offset: end }); }
   }
   const context = { snapshot_id: entry.id, captured_at: entry.capturedAt, expires_at: entry.expiresAt, cursor: offset, next_cursor: null, next_page_token: token, total_chars: entry.text.length, budget_chars: entry.budget, complete: token === null, immutable: true };
-  return { content: [{ type: 'text', text: entry.text.slice(offset, end) }], structuredContent: { ...entry.metadata, context } };
+  if (entry.tool === 'browser_read_text') {
+    const structuredContent = { ...entry.metadata, value: entry.text.slice(offset, end), context };
+    // Keep structured-only and text-only MCP hosts consistent, including continuation pages.
+    return { content: [{ type: 'text', text: JSON.stringify(structuredContent) }], structuredContent };
+  }
+  return { content: [{ type: 'text', text: entry.text.slice(offset, end) }, { type: 'text', text: JSON.stringify({ ...entry.metadata, context }) }], structuredContent: { ...entry.metadata, context } };
 }
 function continueResultPage(tool, input, context) {
   pruneSnapshots();
@@ -822,31 +918,41 @@ class BrowserSocket {
 }
 
 const pendingCalls = new Map();
+const requestBrowsers = new WeakMap();
 let activeToolCalls = 0;
 let extensionSocket = null;
 let extensionReady = false;
 let extensionInfo = null;
 let callSequence = 0;
+const extensionClients = new Set();
+const preferredBrowser = String(process.env.HX0_MCP_BROWSER || '').trim().toLowerCase();
+if (preferredBrowser && !['chrome', 'firefox'].includes(preferredBrowser)) throw new Error('HX0_MCP_BROWSER must be chrome or firefox');
+function selectExtension() {
+  if (extensionSocket && !extensionSocket.closed && extensionSocket.info) return;
+  extensionSocket = [...extensionClients].find((client) => !client.closed && client.info && (!preferredBrowser || client.info.browser.toLowerCase().includes(preferredBrowser))) || null;
+  extensionReady = !!extensionSocket;
+  extensionInfo = extensionSocket?.info || null;
+}
 
-function rejectPending(reason) {
-  for (const row of [...pendingCalls.values()]) row.reject(new Error(reason));
+function rejectPending(reason, client) {
+  for (const row of [...pendingCalls.values()]) if (!client || row.client === client) row.reject(new Error(reason));
 }
 
 function handleExtensionMessage(raw, client) {
-  if (client !== extensionSocket || client.closed) return;
+  if (!extensionClients.has(client) || client.closed) return;
   let message;
   try { message = JSON.parse(raw); } catch { return; }
   if (!message || typeof message !== 'object') return;
   if (message.type === 'hx0_mcp_hello') {
     if (message.protocol !== 'hx0-mcp-v1') { client.close(); return; }
-    extensionReady = true;
-    extensionInfo = {
+    client.info = {
       version: String(message.extensionVersion || ''),
       browser: String(message.browser || ''),
       tabId: message.tabId == null ? null : Number(message.tabId),
     };
+    selectExtension();
     client.sendJson({ type: 'hx0_mcp_ready', protocol: 'hx0-mcp-v1', serverVersion: SERVER_VERSION });
-    stderr('HawkEye extension connected' + (extensionInfo.tabId != null ? ' (tab ' + extensionInfo.tabId + ')' : ''));
+    stderr('HawkEye extension connected' + ' (' + client.info.browser + (client === extensionSocket ? ', active)' : ', standby)'));
     return;
   }
   if (message.type === 'hx0_mcp_pong') return;
@@ -914,13 +1020,25 @@ function slimCaptchaAssistResult(result) {
   };
 }
 
+function normalizeBrowserInput(tool, input, browser) {
+  const result = input && typeof input === 'object' ? { ...input } : {};
+  // Chrome uses CDP for its trusted backend; Firefox also accepts the native alias.
+  if (String(browser || '').toLowerCase() === 'chrome') {
+    if (tool === 'browser_click' && result.clickMode === 'native') result.clickMode = 'trusted';
+    if (tool === 'browser_press_key' && result.inputMode === 'native') result.inputMode = 'trusted';
+  }
+  return result;
+}
+
 function callExtension(tool, input, { signal, hostId } = {}) {
   if (signal?.aborted) return Promise.reject(signal.reason || new Error('MCP request cancelled'));
   if (!extensionSocket || extensionSocket.closed || !extensionReady) {
     return Promise.reject(new Error('HawkEye extension is not connected. Enable “HawkEye Browser Automation MCP” in the extension popup.'));
   }
   if (pendingCalls.size >= MAX_PENDING_CALLS) return Promise.reject(new Error('MCP bridge is busy; retry after outstanding calls finish'));
-  const client = extensionSocket;
+  const client = (signal && requestBrowsers.get(signal)) || extensionSocket;
+  if (client.closed || !extensionClients.has(client)) return Promise.reject(new Error('The browser for this request disconnected; retry after taking a new snapshot'));
+  if (signal) requestBrowsers.set(signal, client);
   const id = 'mcp_' + Date.now().toString(36) + '_' + (++callSequence).toString(36);
   return new Promise((resolve, reject) => {
     const timeoutMs = hx0ToolTimeoutMs(tool);
@@ -941,7 +1059,7 @@ function callExtension(tool, input, { signal, hostId } = {}) {
     }, timeoutMs);
     pendingCalls.set(id, { client, resolve: (value) => finish(resolve, value), reject: (error) => finish(reject, error) });
     signal?.addEventListener('abort', onAbort, { once: true });
-    const sent = client.sendJson({ type: 'hx0_mcp_tool_call', id, tool, hostId, input: input && typeof input === 'object' ? input : {}, timeoutMs });
+    const sent = client.sendJson({ type: 'hx0_mcp_tool_call', id, tool, hostId, input: normalizeBrowserInput(tool, input, client.info?.browser), timeoutMs });
     if (!sent) finish(reject, new Error('Failed to send command to HawkEye extension: transport unavailable or buffer full'));
   });
 }
@@ -1059,12 +1177,79 @@ async function prepareToolInput(tool, rawInput) {
 }
 
 function extensionToolInput(tool, preparedInput) {
-  if (tool !== 'browser_screenshot') return preparedInput;
   const input = { ...preparedInput };
-  delete input.save_to_file;
-  delete input.file_path;
-  delete input.overwrite;
+  if (ACTION_RECEIPT_TOOLS.has(tool)) delete input.include_elements;
+  if (tool === 'hawkeye_evaluate') delete input.include_logs;
+  if (tool === 'browser_navigate') delete input.include_snapshot;
+  if (tool === 'browser_screenshot') {
+    delete input.save_to_file;
+    delete input.file_path;
+    delete input.overwrite;
+  }
   return input;
+}
+
+function compactObservationResult(tool, result, input) {
+  if (tool === 'hawkeye_evaluate' && input?.include_logs !== true) {
+    const { logs, ...receipt } = result;
+    return receipt;
+  }
+  if (tool !== 'browser_navigate' || input?.include_snapshot === true) return result;
+  const { snapshot, elements, frames, ...receipt } = result;
+  const rows = Array.isArray(elements) ? elements : [];
+  const priority = { textbox: 0, searchbox: 0, combobox: 0, button: 1, heading: 2, link: 3 };
+  const selected = rows.filter((row) => row && row.ref && Object.hasOwn(priority, row.role))
+    .map((row, index) => ({ row, index })).sort((a, b) => priority[a.row.role] - priority[b.row.role] || a.index - b.index).slice(0, 12);
+  const lines = selected.map(({ row }) => row.role + ' ' + JSON.stringify(String(row.name || '').replace(/\s+/g, ' ').slice(0, 120)) + ' [ref=' + String(row.ref).slice(0, 80) + ']');
+  let preview = '';
+  let previewElements = 0;
+  for (const line of lines) {
+    if (preview.length + line.length + 1 > 2400) break;
+    preview += (preview ? '\n' : '') + line;
+    previewElements++;
+  }
+  if (!preview && typeof snapshot === 'string') {
+    for (const line of snapshot.split('\n')) {
+      if (preview.length + line.length + 1 > 2400) break;
+      preview += (preview ? '\n' : '') + line;
+    }
+  }
+  receipt.page_preview = preview.slice(0, 2400);
+  receipt.preview_complete = false;
+  receipt.observation_hint = 'This is a bounded preview, not the full page. Use browser_find for a target or browser_snapshot for full observation; do not navigate again just to read details.';
+  if (Array.isArray(frames)) receipt.frames = frames.map((frame) => {
+    if (!frame || typeof frame !== 'object') return frame;
+    const { snapshot, elements, ...metadata } = frame;
+    return metadata;
+  });
+  receipt.transport_compacted = true;
+  receipt.transport_compaction = { scope: 'navigation_preview', preview_elements: previewElements, omitted_fields: ['snapshot', 'elements'] };
+  return receipt;
+}
+
+function compactActionReceipt(tool, result, input) {
+  if (!ACTION_RECEIPT_TOOLS.has(tool) || input?.include_elements === true) return result;
+  const receipt = {};
+  for (const key of ['ok', 'error', 'category', 'hint', 'action', 'operation', 'tabId', 'frameId', 'url', 'urlBefore', 'urlAfter', 'stateChanged', 'routeChanged', 'navigatedTo', 'outcomeVerified', 'inputDispatched', 'eventEvidence', 'userActivationObserved', 'nativeInput']) {
+    if (Object.hasOwn(result, key)) receipt[key] = result[key];
+  }
+  for (const [key, value] of Object.entries(result)) {
+    if (key !== 'snapshot' && key !== 'elements' && key !== 'frames' && !Object.hasOwn(receipt, key)) receipt[key] = value;
+  }
+  if (Array.isArray(result.frames)) {
+    receipt.frames = result.frames.map((frame) => {
+      if (!frame || typeof frame !== 'object') return frame;
+      const { snapshot, elements, ...metadata } = frame;
+      return metadata;
+    });
+  }
+  const omitted = ['snapshot', 'elements'].filter((key) => Object.hasOwn(result, key));
+  if (Array.isArray(result.frames) && result.frames.some((frame) => frame && (Object.hasOwn(frame, 'snapshot') || Object.hasOwn(frame, 'elements')))) omitted.push('frames[].snapshot/elements');
+  if (omitted.length) {
+    receipt.transport_compacted = true;
+    receipt.transport_compaction = { scope: 'action_receipt', omitted_fields: omitted, omitted_element_count: Array.isArray(result.elements) ? result.elements.length : 0 };
+  }
+  return receipt;
 }
 
 function compactValue(value, depth = 0, limits = {}) {
@@ -1108,6 +1293,17 @@ async function toolResultContent(tool, result, requestInput, context = stdioCont
   if (!Object.prototype.hasOwnProperty.call(result, 'value')) result.value = null;
   result.error = result.ok ? null : String(result.error || 'tool failed');
   if (!Object.prototype.hasOwnProperty.call(result, 'hint')) result.hint = null;
+  if (tool === 'browser_read_text' && result.ok) {
+    const text = typeof result.snapshot === 'string' ? result.snapshot : typeof result.value === 'string' ? result.value : null;
+    if (text === null) {
+      return toolResultContent(tool, { ...result, ok: false, value: null, category: 'missing_text_payload', error: 'browser_read_text succeeded without a text payload', hint: 'Update the extension and MCP server together, then retry the read.' }, requestInput, context);
+    }
+    const metadata = compactValue(Object.fromEntries(Object.entries(result).filter(([key]) => key !== 'snapshot' && key !== 'value')), 0, { maxString: 24_000, maxArray: 300 });
+    metadata.text_length = text.length;
+    return cacheResultPage(tool, text, metadata, requestInput, context, 160_000);
+  }
+  result = compactObservationResult(tool, result, requestInput);
+  result = compactActionReceipt(tool, result, requestInput);
   if (tool === 'browser_captcha_assist') result = Object.assign({}, result, slimCaptchaAssistResult(result));
   if ((tool === 'browser_screenshot' || tool === 'browser_captcha_assist') && result && typeof result.dataUrl === 'string') {
     const match = result.dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/s);
@@ -1199,7 +1395,7 @@ async function handleRpc(message, context = createRpcContext()) {
     }
     if (method === 'tools/list') {
       if (message.params?.cursor !== undefined) return rpcError(id, -32602, 'tools/list is not paginated; omit cursor');
-      return rpcResult(id, { tools: TOOL_PROFILE.tools });
+      return rpcResult(id, { tools: context.protocolVersion === '2024-11-05' ? LEGACY_PUBLIC_TOOLS : PUBLIC_TOOLS });
     }
     if (method === 'tools/call') {
       const params = message.params && typeof message.params === 'object' ? message.params : {};
@@ -1214,7 +1410,7 @@ async function handleRpc(message, context = createRpcContext()) {
       if (validation.length) return rpcError(id, -32602, 'Invalid tool arguments', { category: 'invalid_arguments', hint: 'Fix the listed parameter paths before retrying; no browser action was executed.', errors: validation });
       if (input.page_token) {
         const content = continueResultPage(name, input, context);
-        return rpcResult(id, { ...content, ...(content.structuredContent.ok === false ? { isError: true } : {}) });
+        return rpcResult(id, compatibleToolResult({ ...content, ...(content.structuredContent.ok === false ? { isError: true } : {}) }, context));
       }
       if (context.active.has(id)) return rpcError(id, -32600, 'Duplicate in-flight request id');
       if (activeToolCalls >= MAX_PENDING_CALLS) return rpcError(id, -32000, 'MCP bridge is busy; retry after outstanding calls finish');
@@ -1232,12 +1428,12 @@ async function handleRpc(message, context = createRpcContext()) {
         signal.throwIfAborted();
         const content = await toolResultContent(name, result, preparedInput, context);
         if (signal.aborted) return null;
-        return rpcResult(id, { ...content, ...(result?.ok === false ? { isError: true } : {}) });
+        return rpcResult(id, compatibleToolResult({ ...content, ...(result?.ok === false ? { isError: true } : {}) }, context));
       } catch (error) {
         if (signal.aborted) return null;
         if (error.rpcCode) return rpcError(id, error.rpcCode, error.message, { category: error.category, hint: error.hint });
         const failed = { ok: false, value: null, error: String(error && error.message || error), hint: null };
-        return rpcResult(id, { isError: true, ...await toolResultContent(name, failed, params.arguments || {}) });
+        return rpcResult(id, compatibleToolResult({ isError: true, ...await toolResultContent(name, failed, params.arguments || {}) }, context));
       } finally {
         activeToolCalls -= 1;
         if (context.active.get(id) === controller) context.active.delete(id);
@@ -1381,6 +1577,7 @@ const httpServer = http.createServer((request, res) => {
     if (!context) { res.writeHead(404).end(); return; }
     cancelRpcContext(context, 'MCP session closed');
     httpSessions.delete(sessionId);
+    setImmediate(exitIfUnused);
     res.writeHead(204, { 'cache-control': 'no-store' }).end();
     return;
   }
@@ -1398,7 +1595,7 @@ const httpServer = http.createServer((request, res) => {
     res.write('event: endpoint\ndata: /messages?sessionId=' + sessionId + '\n\n');
     const timer = setInterval(() => { try { res.write(': keepalive\n\n'); } catch {} }, 20_000);
     timer.unref();
-    res.on('close', () => { clearInterval(timer); cancelRpcContext(context, 'SSE session closed'); legacySseClients.delete(sessionId); });
+    res.on('close', () => { clearInterval(timer); cancelRpcContext(context, 'SSE session closed'); legacySseClients.delete(sessionId); setImmediate(exitIfUnused); });
     return;
   }
   if (request.method === 'POST' && url.pathname === '/messages') {
@@ -1420,7 +1617,7 @@ const httpServer = http.createServer((request, res) => {
   if (request.method === 'GET' && url.pathname === '/health') {
     const origin = String(request.headers.origin || '');
     if (origin && !extensionOriginAllowed(origin) && !requestOriginAllowed(request)) { res.writeHead(403).end(); return; }
-    writeJson(res, 200, { ok: true, name: SERVER_NAME, version: SERVER_VERSION, extensionConnected: extensionReady, extension: extensionInfo, pendingCalls: pendingCalls.size, activeToolCalls, maxPendingCalls: MAX_PENDING_CALLS, httpSessions: httpSessions.size, toolProfile: TOOL_PROFILE.profile, toolCapabilities: TOOL_PROFILE.capabilities, enabledTools: TOOL_PROFILE.tools.length, snapshots: snapshots.size, snapshotCacheBytes, stdio: { ...stdioWriter.stats, ...stdioInput.stats, activeRequests: stdioRequests, transportClosed: stdioClosed } }, loopbackCorsHeaders(request));
+    writeJson(res, 200, { ok: true, name: SERVER_NAME, version: SERVER_VERSION, extensionConnected: extensionReady, extension: extensionInfo, connectedBrowsers: [...extensionClients].filter((client) => client.info).map((client) => ({ ...client.info, active: client === extensionSocket })), pendingCalls: pendingCalls.size, activeToolCalls, maxPendingCalls: MAX_PENDING_CALLS, httpSessions: httpSessions.size, toolProfile: TOOL_PROFILE.profile, toolCapabilities: TOOL_PROFILE.capabilities, enabledTools: TOOL_PROFILE.tools.length, snapshots: snapshots.size, snapshotCacheBytes, stdio: { ...stdioWriter.stats, ...stdioInput.stats, activeRequests: stdioRequests, transportClosed: stdioClosed } }, loopbackCorsHeaders(request));
     return;
   }
   res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
@@ -1446,18 +1643,18 @@ httpServer.on('upgrade', (request, socket, head) => {
     'Sec-WebSocket-Accept: ' + accept,
     '', '',
   ].join('\r\n'));
-  if (extensionSocket && !extensionSocket.closed) extensionSocket.close();
   const client = new BrowserSocket(socket, handleExtensionMessage, (closed) => {
+    extensionClients.delete(closed);
+    rejectPending('HawkEye extension disconnected', closed);
     if (extensionSocket === closed) {
       extensionSocket = null;
-      extensionReady = false;
-      extensionInfo = null;
-      rejectPending('HawkEye extension disconnected');
-      stderr('HawkEye extension disconnected');
+      selectExtension();
+      stderr('Active HawkEye extension disconnected; refreshed available browser');
     }
   });
-  extensionSocket = client;
-  extensionReady = false;
+  // Bound unauthenticated/idle connections as well as normal browser connections.
+  if (extensionClients.size >= 8) { client.close(); return; }
+  extensionClients.add(client);
   if (head?.length) client.feed(head);
 });
 
@@ -1467,7 +1664,8 @@ httpServer.on('error', (error) => {
   } else {
     stderr(error && error.stack || error);
   }
-  process.exitCode = 2;
+  shutdown();
+  process.exit(2);
 });
 
 httpServer.listen(wsPort, '127.0.0.1', () => {
@@ -1479,9 +1677,10 @@ httpServer.listen(wsPort, '127.0.0.1', () => {
 const keepAlive = setInterval(() => {
   const now = Date.now();
   pruneSnapshots(now);
-  if (extensionSocket && !extensionSocket.closed) {
-    if (now - extensionSocket.lastSeenAt > 65_000) extensionSocket.close();
-    else extensionSocket.sendJson({ type: 'hx0_mcp_ping', at: now });
+  exitIfUnused();
+  for (const client of extensionClients) {
+    if (now - client.lastSeenAt > 65_000) client.close();
+    else client.sendJson({ type: 'hx0_mcp_ping', at: now });
   }
   for (const [id, context] of httpSessions) {
     if (!context.active.size && now - context.lastSeenAt > SESSION_IDLE_MS) { cancelRpcContext(context, 'MCP session expired'); httpSessions.delete(id); }
@@ -1584,16 +1783,32 @@ const stdioInput = createBoundedInput((line) => {
 }, closeStdio);
 const ownedParentPID = Number(process.env.DEEPSENTRY_MCP_PARENT_PID || '');
 const ownedByDeepSentry = Number.isInteger(ownedParentPID) && ownedParentPID > 0 && ownedParentPID !== process.pid;
-
+if (ownedByDeepSentry) {
+  const parentWatch = setInterval(() => {
+    try { process.kill(ownedParentPID, 0); }
+    catch { shutdown(); process.exit(0); }
+  }, 1000);
+  parentWatch.unref();
+}
 process.stdin.on('data', (chunk) => stdioInput.feed(chunk));
+let stdinEnded = false;
+const keepHttpAlive = process.argv.includes('--keep-alive') || process.env.HX0_MCP_KEEP_ALIVE === '1';
+function exitIfUnused() {
+  if (stdinEnded && !keepHttpAlive && !httpSessions.size && !legacySseClients.size) {
+    shutdown();
+    process.exit(0);
+  }
+}
 process.stdin.on('end', () => {
   stdioInput.end();
-  cancelRpcContext(stdioContext, 'stdio input ended');
+  stdinEnded = true;
   if (ownedByDeepSentry) {
     stderr('stdio input ended; owned MCP server exiting with DeepSentry');
     shutdown();
     process.exit(0);
   }
+  cancelRpcContext(stdioContext, 'stdio input ended');
+  setImmediate(exitIfUnused);
 });
 process.stdin.on('error', (error) => closeStdio('stdio input failed: ' + error.message));
 
@@ -1603,24 +1818,14 @@ function shutdown() {
   for (const context of httpSessions.values()) cancelRpcContext(context, 'MCP server shutting down');
   httpSessions.clear();
   rejectPending('MCP server shutting down');
-  if (extensionSocket) extensionSocket.close();
+  for (const client of extensionClients) client.close();
+  extensionClients.clear();
   for (const { stream, context } of legacySseClients.values()) {
     cancelRpcContext(context, 'MCP server shutting down');
     try { stream.end(); } catch {}
   }
   legacySseClients.clear();
   try { httpServer.close(); } catch {}
-}
-if (ownedByDeepSentry) {
-  const parentWatch = setInterval(() => {
-    try { process.kill(ownedParentPID, 0); }
-    catch {
-      stderr('DeepSentry parent ' + ownedParentPID + ' is gone; shutting down MCP server');
-      shutdown();
-      process.exit(0);
-    }
-  }, 1000);
-  parentWatch.unref();
 }
 process.once('SIGINT', () => { shutdown(); process.exit(0); });
 process.once('SIGTERM', () => { shutdown(); process.exit(0); });

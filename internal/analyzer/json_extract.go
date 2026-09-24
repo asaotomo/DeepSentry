@@ -1,9 +1,82 @@
 package analyzer
 
 import (
+	"encoding/json"
 	"strings"
 	"unicode"
 )
+
+// recoverLocalControlMessage handles special-token tool messages occasionally
+// emitted as plain text by local chat templates. Only complete, anchored JSON
+// envelopes become actions; malformed/unknown tokens request a corrected turn.
+func recoverLocalControlMessage(raw string) (AgentResponse, bool) {
+	text := strings.TrimSpace(raw)
+	var header, payload string
+	switch {
+	case strings.HasPrefix(text, "<|channel|>"):
+		var found bool
+		header, payload, found = strings.Cut(text, "<|message|>")
+		if !found {
+			return localControlRetry(), true
+		}
+	case strings.HasPrefix(text, "<|im_start|>assistant"):
+		var found bool
+		header, payload, found = strings.Cut(text, "<|im_sep|>")
+		if !found {
+			return localControlRetry(), true
+		}
+	default:
+		return AgentResponse{}, false
+	}
+	toolName := ""
+	for _, field := range strings.Fields(header) {
+		if strings.HasPrefix(field, "to=") {
+			toolName = strings.SplitN(strings.TrimPrefix(field, "to="), "<|", 2)[0]
+			break
+		}
+	}
+	payload = strings.TrimSpace(payload)
+	for _, suffix := range []string{"<|im_end|>", "<|eot_id|>"} {
+		payload = strings.TrimSpace(strings.TrimSuffix(payload, suffix))
+	}
+	if toolName == "" && (strings.Contains(header, "<|channel|>final") || strings.Contains(header, "<|meta_sep|>final")) {
+		if resp, ok := recoverPlainTextResponse(payload); ok {
+			return resp, true
+		}
+		return localControlRetry(), true
+	}
+	if !json.Valid([]byte(payload)) || len(payload) > 64*1024 {
+		return localControlRetry(), true
+	}
+	switch toolName {
+	case "execute":
+		var args struct {
+			Cmd     string `json:"cmd"`
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(payload), &args) != nil {
+			return localControlRetry(), true
+		}
+		command := strings.TrimSpace(args.Command)
+		if command == "" {
+			command = strings.TrimSpace(args.Cmd)
+		}
+		if command == "" {
+			return localControlRetry(), true
+		}
+		return AgentResponse{Action: "execute", Command: command, Thought: "本地模型请求执行命令。"}, true
+	case "agent_action":
+		resp, err := ParseToolCallResponse(payload)
+		if err == nil {
+			return resp, true
+		}
+	}
+	return localControlRetry(), true
+}
+
+func localControlRetry() AgentResponse {
+	return AgentResponse{Thought: "本地模型输出了无法识别的工具控制格式，正在请求标准 JSON 动作。", RiskLevel: "low"}
+}
 
 // extractJSONPayload 从混合文本/Markdown 中提取 JSON 对象，并返回前置说明文字
 func extractJSONPayload(s string) (jsonPart, prose string) {
@@ -110,6 +183,9 @@ func recoverPlainTextResponse(raw string) (AgentResponse, bool) {
 	text := strings.TrimSpace(raw)
 	if text == "" {
 		return AgentResponse{}, false
+	}
+	if strings.HasPrefix(text, "<|channel|>") || strings.HasPrefix(text, "<|im_start|>assistant to=") {
+		return localControlRetry(), true
 	}
 
 	// A response that is clearly trying to be JSON is more likely truncated

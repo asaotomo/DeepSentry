@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"ai-edr/internal/config"
+	"ai-edr/internal/mcp"
 	"ai-edr/internal/memory"
 	"ai-edr/internal/runtimev3"
 	"ai-edr/internal/tools"
@@ -147,6 +148,36 @@ func TestToolsAndSubAgentMiddlewareValidationPaths(t *testing.T) {
 	}
 }
 
+func TestToolCatalogDiscoversMCPAndRunsCanonicalTool(t *testing.T) {
+	registry := mcp.NewRegistry()
+	registry.RegisterHandler("probe__inspect", mcp.ExternalTool{
+		Name: "probe__inspect", Server: "probe", Description: "Inspect a target",
+		InputSchema: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{"target": map[string]interface{}{"type": "string"}},
+			"required": []string{"target"},
+		},
+	}, func(args map[string]string) (string, error) { return "inspected " + args["target"], nil })
+	mw := NewToolsMiddleware()
+	mw.Registry = registry
+	ctx := &StepContext{State: NewAgentState("")}
+	for _, name := range []string{"probe__inspect", "mcp:probe__inspect"} {
+		result, handled, err := mw.HandleAction(ctx, &AgentAction{Type: ActionTool, ToolName: "tool_catalog", ToolArgs: map[string]string{"name": name}})
+		if err != nil || !handled || !strings.Contains(result.Output, "probe__inspect") || !strings.Contains(result.Output, "required") {
+			t.Fatalf("MCP catalog %q: result=%#v handled=%v err=%v", name, result, handled, err)
+		}
+	}
+	for _, category := range []string{"mcp", "all"} {
+		result, handled, err := mw.HandleAction(ctx, &AgentAction{Type: ActionTool, ToolName: "tool_catalog", ToolArgs: map[string]string{"category": category, "query": "inspect"}})
+		if err != nil || !handled || !strings.Contains(result.Output, "mcp:probe__inspect") {
+			t.Fatalf("MCP search %q: result=%#v handled=%v err=%v", category, result, handled, err)
+		}
+	}
+	result, handled, err := mw.HandleAction(ctx, &AgentAction{Type: ActionTool, ToolName: "mcp:probe__inspect", ToolArgs: map[string]string{"target": "host-1"}})
+	if err != nil || !handled || !strings.Contains(result.Output, "inspected host-1") {
+		t.Fatalf("MCP call result=%#v handled=%v err=%v", result, handled, err)
+	}
+}
+
 func TestDeepAgentHandlesNativeToolBatchThroughMiddleware(t *testing.T) {
 	state := NewAgentState("")
 	agent := &DeepAgent{State: state, Middleware: []Middleware{NewToolsMiddleware()}}
@@ -270,6 +301,14 @@ func TestMemoryTodoAndBuilderOptions(t *testing.T) {
 	remember, handled, err := memoryMW.HandleAction(ctx, &AgentAction{Type: ActionRemember, MemoryKey: "ioc", MemoryValue: "198.51.100.4"})
 	if err != nil || !handled || !strings.Contains(remember.Output, "已保存") {
 		t.Fatalf("remember=%#v handled=%v err=%v", remember, handled, err)
+	}
+	badScope, handled, err := memoryMW.HandleAction(ctx, &AgentAction{Type: ActionRemember, MemoryKey: "mistake", MemoryValue: "value", MemoryScope: "globla"})
+	if err != nil || !handled || !strings.Contains(badScope.Output, "只能是") || store.Count() != 1 {
+		t.Fatalf("invalid memory scope was accepted: result=%#v handled=%v err=%v count=%d", badScope, handled, err, store.Count())
+	}
+	badScope, handled, err = memoryMW.HandleAction(ctx, &AgentAction{Type: ActionForget, MemoryKey: "ioc", MemoryScope: "globla"})
+	if err != nil || !handled || !strings.Contains(badScope.Output, "只能是") || store.Count() != 1 {
+		t.Fatalf("invalid forget scope was accepted: result=%#v handled=%v err=%v count=%d", badScope, handled, err, store.Count())
 	}
 	forget, handled, err := memoryMW.HandleAction(ctx, &AgentAction{Type: ActionForget, MemoryKey: "ioc"})
 	if err != nil || !handled || !strings.Contains(forget.Output, "已删除") {

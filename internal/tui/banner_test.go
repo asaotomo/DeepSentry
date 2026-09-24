@@ -238,6 +238,7 @@ func TestRandomUsageTipStablePool(t *testing.T) {
 		"zip_password_recover", "fofa_rules", "bilibili-play", "ssh_legacy_compat",
 		"nuclei_plan", "mcp_server_configs", "⌘V", "Ctrl+A", "生成报告",
 		"inspection_run", "重启会话", "kind=inspection", "captcha_assist",
+		".evidence.jsonl", "允许本次", "reply_text", "--computer-check", "computer_use",
 	} {
 		if !strings.Contains(joined, feature) {
 			t.Fatalf("tip pool missing latest capability %q", feature)

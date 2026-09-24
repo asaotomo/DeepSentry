@@ -26,6 +26,23 @@ func darkTerminalPalette() terminalPalette {
 	}
 }
 
+func legacyTerminalPalette(light bool) terminalPalette {
+	p := terminalPalette{bg: "0", surface: "0", border: "7", accent: "14",
+		green: "10", yellow: "11", red: "9", muted: "7", text: "15", thought: "7", help: "7", robot: "14"}
+	if light {
+		p.bg, p.surface, p.text, p.muted, p.thought, p.help = "15", "15", "0", "0", "0", "0"
+		p.border, p.accent, p.robot, p.green, p.yellow, p.red = "8", "4", "4", "2", "6", "1"
+	}
+	return p
+}
+
+func terminalBorder() lipgloss.Border {
+	if ui.PlainTextMode() {
+		return lipgloss.ASCIIBorder()
+	}
+	return lipgloss.RoundedBorder()
+}
+
 func lightTerminalPalette() terminalPalette {
 	return terminalPalette{
 		bg: "#f7f8fc", surface: "#e7ebf3", border: "#8a96aa", accent: "#2457c5",
@@ -110,7 +127,7 @@ func ConfigureTerminalPreferences(requested ...string) string {
 	resolved := theme
 	if theme == "auto" {
 		resolved = "dark"
-		if !termenv.HasDarkBackground() {
+		if !ui.LegacyConsole() && !termenv.HasDarkBackground() {
 			resolved = "light"
 		}
 	}
@@ -119,7 +136,9 @@ func ConfigureTerminalPreferences(requested ...string) string {
 		applyNoColorStyles()
 		return resolved
 	}
-	if resolved == "light" {
+	if ui.LegacyConsole() && lipgloss.ColorProfile() != termenv.TrueColor {
+		applyTerminalPalette(legacyTerminalPalette(resolved == "light"))
+	} else if resolved == "light" {
 		applyTerminalPalette(lightTerminalPalette())
 	} else {
 		applyTerminalPalette(darkTerminalPalette())
@@ -138,11 +157,11 @@ func applyTerminalPalette(p terminalPalette) {
 	styleStep = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
 	styleThought = lipgloss.NewStyle().Foreground(colorThought).Italic(true).PaddingLeft(2)
 	styleStream = lipgloss.NewStyle().Foreground(colorThought).PaddingLeft(2)
-	styleToolBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1).MarginLeft(2)
-	styleSubAgentBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorYellow).Padding(0, 1).MarginLeft(2)
-	styleTargetBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorGreen).Padding(0, 1).MarginLeft(2)
-	styleTodoBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorGreen).Padding(0, 1).MarginLeft(2)
-	styleSubAgentResult = lipgloss.NewStyle().Foreground(colorMuted).Border(lipgloss.NormalBorder()).BorderForeground(colorBorder).Padding(0, 1).MarginLeft(4)
+	styleToolBox = lipgloss.NewStyle().Border(terminalBorder()).BorderForeground(colorAccent).Padding(0, 1).MarginLeft(2)
+	styleSubAgentBox = lipgloss.NewStyle().Border(terminalBorder()).BorderForeground(colorYellow).Padding(0, 1).MarginLeft(2)
+	styleTargetBox = lipgloss.NewStyle().Border(terminalBorder()).BorderForeground(colorGreen).Padding(0, 1).MarginLeft(2)
+	styleTodoBox = lipgloss.NewStyle().Border(terminalBorder()).BorderForeground(colorGreen).Padding(0, 1).MarginLeft(2)
+	styleSubAgentResult = lipgloss.NewStyle().Foreground(colorMuted).Border(terminalBorder()).BorderForeground(colorBorder).Padding(0, 1).MarginLeft(4)
 	styleInputLine = lipgloss.NewStyle().Foreground(colorText).Background(colorSurface)
 	styleInputCursor = lipgloss.NewStyle().Foreground(colorBg).Background(colorAccent).Bold(true)
 	styleInputBorder = lipgloss.NewStyle().Foreground(colorBorder)
@@ -152,9 +171,13 @@ func applyTerminalPalette(p terminalPalette) {
 	styleSuccess = lipgloss.NewStyle().Foreground(colorGreen)
 	styleError = lipgloss.NewStyle().Foreground(colorRed)
 	styleInfo = lipgloss.NewStyle().Foreground(colorMuted)
-	styleConfirmBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorYellow).Background(colorSurface).Padding(1, 2).MarginLeft(2)
+	styleConfirmBox = lipgloss.NewStyle().Border(terminalBorder()).BorderForeground(colorYellow).Background(colorSurface).Padding(1, 2).MarginLeft(2)
 	styleHelp = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
 	styleHelpHint = lipgloss.NewStyle().Foreground(p.help)
+	if ui.LegacyConsole() {
+		styleThought = styleThought.Italic(false)
+		styleHelp = styleHelp.Italic(false)
+	}
 
 	styleBannerBorder = lipgloss.NewStyle().Foreground(colorAccent)
 	styleBannerRobot = lipgloss.NewStyle().Foreground(p.robot)
@@ -187,11 +210,11 @@ func applyNoColorStyles() {
 	styleStep = lipgloss.NewStyle().Bold(true)
 	styleThought = lipgloss.NewStyle().Italic(true).PaddingLeft(2)
 	styleStream = lipgloss.NewStyle().PaddingLeft(2)
-	styleToolBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginLeft(2)
-	styleSubAgentBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginLeft(2)
-	styleTargetBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginLeft(2)
-	styleTodoBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginLeft(2)
-	styleSubAgentResult = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1).MarginLeft(4)
+	styleToolBox = lipgloss.NewStyle().Border(terminalBorder()).Padding(0, 1).MarginLeft(2)
+	styleSubAgentBox = lipgloss.NewStyle().Border(terminalBorder()).Padding(0, 1).MarginLeft(2)
+	styleTargetBox = lipgloss.NewStyle().Border(terminalBorder()).Padding(0, 1).MarginLeft(2)
+	styleTodoBox = lipgloss.NewStyle().Border(terminalBorder()).Padding(0, 1).MarginLeft(2)
+	styleSubAgentResult = lipgloss.NewStyle().Border(terminalBorder()).Padding(0, 1).MarginLeft(4)
 	styleInputLine = lipgloss.NewStyle()
 	styleInputCursor = lipgloss.NewStyle().Reverse(true).Bold(true)
 	styleInputBorder = lipgloss.NewStyle()
@@ -201,7 +224,7 @@ func applyNoColorStyles() {
 	styleSuccess = lipgloss.NewStyle()
 	styleError = lipgloss.NewStyle()
 	styleInfo = lipgloss.NewStyle()
-	styleConfirmBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).MarginLeft(2)
+	styleConfirmBox = lipgloss.NewStyle().Border(terminalBorder()).Padding(1, 2).MarginLeft(2)
 	styleHelp = lipgloss.NewStyle().Italic(true)
 	styleHelpHint = lipgloss.NewStyle()
 
@@ -227,4 +250,19 @@ func applyNoColorStyles() {
 	mdTableBorder = lipgloss.NewStyle()
 	mdTableHeader = lipgloss.NewStyle().Bold(true)
 	mdListMarker = lipgloss.NewStyle().Bold(true)
+}
+
+// Nested styles reset SGR state. Reapply the canvas background after those
+// resets so conhost does not paint black holes between text and padding.
+func paintFrameBackground(frame string) string {
+	if !ui.ColorEnabled() {
+		return frame
+	}
+	color := lipgloss.ColorProfile().Color(string(colorBg))
+	if color == nil || color.Sequence(true) == "" {
+		return frame
+	}
+	bg := "\x1b[" + color.Sequence(true) + "m"
+	frame = strings.NewReplacer("\x1b[0m", "\x1b[0m"+bg, "\x1b[m", "\x1b[m"+bg, "\x1b[49m", bg).Replace(frame)
+	return bg + strings.ReplaceAll(frame, "\n", "\x1b[0m\n"+bg) + "\x1b[0m"
 }

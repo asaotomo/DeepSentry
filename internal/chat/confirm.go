@@ -19,6 +19,7 @@ type ConfirmRequest struct {
 	Kind       string `json:"kind,omitempty"`
 	Seq        int64  `json:"seq"`
 	Summary    string `json:"summary"`
+	Command    string `json:"command,omitempty"`
 	Reason     string `json:"reason"`
 	ScopeKey   string `json:"scope_key,omitempty"`
 	ScopeLabel string `json:"scope_label,omitempty"`
@@ -42,22 +43,47 @@ func ConfirmDirFromContext(ctx context.Context) string {
 	return strings.TrimSpace(dir)
 }
 
+// ParseConfirmText only accepts wording that cannot be an ordinary chat reply
+// for approvals. "好", "是", "ok" and "y" are deliberately absent: a casual
+// acknowledgement must never release a high-risk operation.
 func ParseConfirmText(text string) (string, bool) {
-	s := strings.ToLower(strings.TrimSpace(text))
-	s = strings.TrimPrefix(s, "/ds ")
-	s = strings.TrimSpace(s)
-	switch s {
-	case "允许本次", "仅允许本次", "允许", "好", "是", "yes", "y", "ok", "allow":
+	switch normalizeConfirmText(text) {
+	case "允许本次", "仅允许本次", "允许", "allow", "allow once", "yes":
 		return "allow_once", true
 	case "本次会话允许所有高危操作", "本会话允许所有高危操作", "本会话全部":
 		return "allow_all_session", true
-	case "本会话允许同类操作", "本会话同类", "本会话允许", "同类", "session":
+	case "本会话允许同类操作", "本会话同类", "allow session":
 		return "allow_session", true
-	case "拒绝", "否", "不", "no", "n", "deny", "cancel":
+	case "拒绝", "否", "不", "不允许", "no", "n", "deny", "cancel":
 		return "deny", true
 	default:
 		return "", false
 	}
+}
+
+// IsExplicitConfirmPhrase reports wording that only makes sense as an answer
+// to an approval prompt, so it must not start a new task when nothing waits.
+func IsExplicitConfirmPhrase(text string) bool {
+	switch normalizeConfirmText(text) {
+	case "允许本次", "仅允许本次", "allow once",
+		"本次会话允许所有高危操作", "本会话允许所有高危操作", "本会话全部",
+		"本会话允许同类操作", "本会话同类", "allow session":
+		return true
+	}
+	return false
+}
+
+func normalizeConfirmText(text string) string {
+	s := strings.ToLower(strings.TrimSpace(text))
+	s = strings.TrimPrefix(s, "/ds ")
+	s = strings.Trim(strings.TrimSpace(s), "。.!！")
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// PendingConfirmReminder answers any non-command message while an approval
+// waits, so an unrelated reply cannot queue a task and let the prompt time out.
+func PendingConfirmReminder(req ConfirmRequest) string {
+	return "还有一项操作在等你确认，没收到明确答复前不会执行。\n\n" + FormatConfirmPrompt(req) + "\n\n不想继续就发 /stop。"
 }
 
 func FormatConfirmPrompt(req ConfirmRequest) string {
@@ -65,19 +91,25 @@ func FormatConfirmPrompt(req ConfirmRequest) string {
 		return "需要补充信息：\n" + req.Summary + "\n直接回复即可继续原任务；/stop 停止，/new 开新会话。"
 	}
 	var b strings.Builder
-	b.WriteString("需要确认高危操作后才能继续：\n")
-	if req.Summary != "" {
-		b.WriteString(req.Summary)
+	b.WriteString("已拦截，尚未执行。\n")
+	body := strings.TrimSpace(req.Command)
+	if body == "" {
+		body = strings.TrimSpace(req.Summary)
+	}
+	if body != "" {
+		b.WriteString("\n要执行：\n")
+		b.WriteString(body)
 		b.WriteString("\n")
 	}
-	if req.Reason != "" && req.Reason != req.Summary {
-		b.WriteString(req.Reason)
+	if reason := strings.TrimSpace(req.Reason); reason != "" && reason != body {
+		b.WriteString("\n拦截理由：\n")
+		b.WriteString(reason)
 		b.WriteString("\n")
 	}
 	if req.ScopeLabel != "" {
-		b.WriteString("同类授权范围：" + req.ScopeLabel + "\n")
+		b.WriteString("\n同类授权范围：" + req.ScopeLabel + "\n")
 	}
-	b.WriteString("回复：允许本次 / 本会话同类 / 本次会话允许所有高危操作 / 拒绝")
+	b.WriteString("\n请原样回复其中一项：允许本次 / 本会话同类 / 本次会话允许所有高危操作 / 拒绝\n10 分钟内未回复按拒绝处理。")
 	return b.String()
 }
 

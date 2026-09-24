@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"ai-edr/internal/harness"
@@ -114,13 +115,16 @@ func (m SessionPickerModel) View() string {
 
 // PickSession 返回 sessionID（空=新会话），cancelled 表示用户取消
 func PickSession() (sessionID string, cancelled bool, err error) {
+	restoreConsole := prepareConsoleDisplay()
+	defer restoreConsole()
 	items, err := harness.ListSessionSummaries()
 	if err != nil {
 		return "", false, err
 	}
 	done := make(chan pickResultMsg, 1)
 	m := newSessionPicker(items, done)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithOutput(newInputCursorOutput(os.Stdout, nil)))
+	defer startConsoleResizeWatcher(p)()
 	if _, err := p.Run(); err != nil {
 		return "", false, err
 	}

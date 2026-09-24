@@ -96,3 +96,46 @@ func TestSubAgentRegistrySmokeMetadataIsComplete(t *testing.T) {
 		}
 	}
 }
+
+func TestBaselineHardeningAgentsAreDistinctAndDiscoverable(t *testing.T) {
+	checks := []struct {
+		name  string
+		terms []string
+	}{
+		{"server-baseline-hardener", []string{"服务器", "Windows", "Linux", "回滚", "复验"}},
+		{"endpoint-baseline-hardener", []string{"终端", "Windows", "macOS", "Linux", "恢复密钥", "复验"}},
+	}
+	catalog := subagent.FormatRegistryPrompt()
+	for _, check := range checks {
+		spec, ok := subagent.Find(check.name)
+		if !ok || !strings.Contains(catalog, check.name) {
+			t.Fatalf("baseline agent %q is not registered and discoverable", check.name)
+		}
+		for _, term := range check.terms {
+			if !strings.Contains(spec.SystemPrompt, term) {
+				t.Fatalf("%s prompt missing %q", check.name, term)
+			}
+		}
+	}
+}
+
+func TestSpecialistRoutingAndNetworkDeviceExecutionProfile(t *testing.T) {
+	catalog := subagent.FormatRegistryPrompt()
+	for _, name := range []string{"host-incident-responder", "network-device-analyst"} {
+		if _, ok := subagent.Find(name); !ok || !strings.Contains(catalog, name) {
+			t.Fatalf("specialist %s is not discoverable", name)
+		}
+	}
+	spec, _ := subagent.Find("network-device-analyst")
+	parent := &DeepAgent{State: NewAgentState(t.TempDir()), SessionID: "session_device_prompt"}
+	runner := NewSubAgentRunner(parent)
+	runner.StepFn = func(opts analyzer.StepOptions) (analyzer.AgentResponse, error) {
+		if !strings.Contains(opts.ExtraPrompt, "网络设备 CLI-first") || strings.Contains(opts.ExtraPrompt, "Shell-first") {
+			t.Fatalf("network-device worker received shell guidance: %s", opts.ExtraPrompt)
+		}
+		return analyzer.AgentResponse{Action: "finish", FinalReport: "device checked"}, nil
+	}
+	if _, err := runner.Run(*spec, "检查交换机接口", collector.SystemContext{}, false); err != nil {
+		t.Fatal(err)
+	}
+}

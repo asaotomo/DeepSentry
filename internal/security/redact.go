@@ -26,8 +26,24 @@ func RedactSensitiveText(text string) string {
 	if text == "" {
 		return text
 	}
-	for _, secret := range configuredSecrets() {
+	return redactSensitiveTextWithSecrets(text, configuredSecrets())
+}
+
+func redactSensitiveTextWithSecrets(text string, secrets []string) string {
+	if text == "" {
+		return text
+	}
+	for _, secret := range secrets {
 		text = strings.ReplaceAll(text, secret, "***")
+	}
+	// Most checkpoint/tool-output strings contain no credential syntax. Avoid
+	// scanning every such string with five regular expressions.
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "pass") && !strings.Contains(lower, "pwd") &&
+		!strings.Contains(lower, "token") && !strings.Contains(lower, "secret") &&
+		!strings.Contains(lower, "key") && !strings.Contains(lower, "author") &&
+		!strings.Contains(lower, "bearer") && !strings.Contains(lower, "://") {
+		return text
 	}
 	text = privateKeyPattern.ReplaceAllString(text, "[PRIVATE KEY REDACTED]")
 	text = bearerPattern.ReplaceAllString(text, `${1}***`)
@@ -51,7 +67,7 @@ func RedactJSON(value any) ([]byte, error) {
 	if err := decoder.Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decode JSON for redaction: %w", err)
 	}
-	redacted := redactJSONValue(decoded, "")
+	redacted := redactJSONValue(decoded, "", configuredSecrets())
 	out, err := json.MarshalIndent(redacted, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode redacted JSON: %w", err)
@@ -59,25 +75,25 @@ func RedactJSON(value any) ([]byte, error) {
 	return out, nil
 }
 
-func redactJSONValue(value any, key string) any {
+func redactJSONValue(value any, key string, secrets []string) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for childKey, child := range typed {
-			out[childKey] = redactJSONValue(child, childKey)
+			out[childKey] = redactJSONValue(child, childKey, secrets)
 		}
 		return out
 	case []any:
 		out := make([]any, len(typed))
 		for i, child := range typed {
-			out[i] = redactJSONValue(child, key)
+			out[i] = redactJSONValue(child, key, secrets)
 		}
 		return out
 	case string:
 		if sensitiveJSONKey.MatchString(key) && typed != "" {
 			return "***"
 		}
-		return RedactSensitiveText(typed)
+		return redactSensitiveTextWithSecrets(typed, secrets)
 	default:
 		return value
 	}

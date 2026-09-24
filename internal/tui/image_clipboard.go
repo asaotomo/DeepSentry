@@ -3,6 +3,8 @@ package tui
 import (
 	"ai-edr/internal/analyzer"
 	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -85,6 +88,7 @@ func pasteClipboardImageOnlyCmd(sessionID string) tea.Cmd {
 func looksLikeLocalImagePath(text string) (string, bool) {
 	text = strings.TrimSpace(text)
 	text = strings.Trim(text, `"'`)
+	text = strings.TrimSpace(text)
 	if text == "" || strings.ContainsAny(text, "\n\r\t") {
 		return "", false
 	}
@@ -132,10 +136,18 @@ func resolveClipboardPaste(
 	if textErr == nil && text != "" {
 		return clipboardPasteResultMsg{text: text}
 	}
-	if textErr != nil {
+	// A picture clipboard has no CF_UNICODETEXT. Windows then reports error 0,
+	// whose text is "The operation completed successfully." That is not a
+	// second failure and must not hide the image error.
+	if textErr != nil && !clipboardTextAbsent(textErr) {
 		return clipboardPasteResultMsg{err: fmt.Errorf("剪贴板无可用图片（%v），读取文本也失败: %w", imageErr, textErr)}
 	}
 	return clipboardPasteResultMsg{err: imageErr}
+}
+
+func clipboardTextAbsent(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "operation completed successfully") || strings.Contains(msg, "操作成功完成")
 }
 
 func saveClipboardImage(sessionID string) (string, error) {
@@ -268,15 +280,50 @@ end run`
 		}
 		return fmt.Errorf("剪贴板中没有可读取的 PNG 图片: %s", strings.Join(failures, "; "))
 	case "windows":
-		const script = `$p=$args[0]; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img=[System.Windows.Forms.Clipboard]::GetImage(); if($null -eq $img){exit 3}; $img.Save($p,[System.Drawing.Imaging.ImageFormat]::Png)`
-		output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path).CombinedOutput()
+		// Windows PowerShell appends every argument after -Command onto the
+		// script text. Passing the path that way makes Save() see a bare
+		// E:\... token and abort with UnexpectedToken before it reads the
+		// clipboard. The path has to live inside an encoded script.
+		exe, args := windowsClipboardPowerShell(path)
+		output, err := exec.Command(exe, args...).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("剪贴板中没有可读取的 PNG 图片: %s", strings.TrimSpace(string(output)))
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 3 {
+				return errors.New("剪贴板中没有可读取的 PNG 图片")
+			}
+			detail := strings.TrimSpace(string(output))
+			if detail == "" {
+				detail = err.Error()
+			}
+			return fmt.Errorf("剪贴板中没有可读取的 PNG 图片: %s", detail)
+		}
+		stat, statErr := os.Stat(path)
+		if statErr != nil || stat.Size() == 0 {
+			return errors.New("剪贴板图片保存后为空")
 		}
 		return nil
 	default:
 		return fmt.Errorf("%s 暂不支持直接读取图片剪贴板；请使用 /image <路径>", runtime.GOOS)
 	}
+}
+
+func windowsClipboardPowerShell(path string) (string, []string) {
+	quoted := strings.ReplaceAll(path, "'", "''")
+	// Clipboard.GetImage only works on an STA thread. Windows PowerShell is MTA
+	// unless -STA is set, and then a real screenshot comes back as null.
+	// Some apps also put a PNG byte blob on the clipboard instead of a bitmap.
+	script := "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $data=[System.Windows.Forms.Clipboard]::GetDataObject(); if($null -ne $data){ foreach($fmt in @('PNG','image/png')){ if($data.GetDataPresent($fmt)){ $raw=$data.GetData($fmt); if($raw -is [byte[]]){ [IO.File]::WriteAllBytes('" + quoted + "',$raw); exit 0 }; if($raw -is [IO.MemoryStream]){ [IO.File]::WriteAllBytes('" + quoted + "',$raw.ToArray()); exit 0 } } } }; $img=[System.Windows.Forms.Clipboard]::GetImage(); if($null -eq $img){ exit 3 }; $img.Save('" + quoted + "',[System.Drawing.Imaging.ImageFormat]::Png)"
+	encoded := utf16.Encode([]rune(script))
+	raw := make([]byte, len(encoded)*2)
+	for i, unit := range encoded {
+		binary.LittleEndian.PutUint16(raw[i*2:], unit)
+	}
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		root = `C:\Windows`
+	}
+	exe := filepath.Join(root, `System32\WindowsPowerShell\v1.0\powershell.exe`)
+	return exe, []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", base64.StdEncoding.EncodeToString(raw)}
 }
 
 func commandOutputToFile(path, command string, args ...string) error {

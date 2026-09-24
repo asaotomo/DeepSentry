@@ -14,7 +14,7 @@ func PlainTextMode() bool {
 	if envTruthy("DEEPSENTRY_FANCY") || envTruthy("DEEPSENTRY_EMOJI") {
 		return false
 	}
-	if envTruthy("DEEPSENTRY_PLAIN") || envTruthy("DEEPSENTRY_ASCII") || envTruthy("DEEPSENTRY_NO_EMOJI") {
+	if LegacyConsole() || envTruthy("DEEPSENTRY_PLAIN") || envTruthy("DEEPSENTRY_ASCII") || envTruthy("DEEPSENTRY_NO_EMOJI") {
 		return true
 	}
 	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
@@ -34,6 +34,13 @@ func PlainTextMode() bool {
 		return true
 	}
 	return false
+}
+
+// LegacyConsole uses a conservative palette for Windows conhost. It can also
+// be enabled on another OS to preview the same rendering.
+func LegacyConsole() bool {
+	return envTruthy("DEEPSENTRY_LEGACY_CONSOLE") ||
+		(runtime.GOOS == "windows" && !windowsModernTerminal(strings.ToLower(os.Getenv("TERM"))))
 }
 
 func ColorEnabled() bool {
@@ -188,6 +195,58 @@ func TerminalText(s string) string {
 		"⏭", "[SKIP]",
 		"▶", ">",
 		"▸", ">",
+		"💭", "*",
+		"✓", "+",
+		"✗", "x",
+		"✔", "+",
+		"✘", "x",
 	)
-	return replacer.Replace(s)
+	replaced := replacer.Replace(s)
+	// Named icons above cover plain terminals. Only the legacy Windows console
+	// also mis-measures every other emoji, so collapse those before wrapping.
+	if LegacyConsole() {
+		replaced = CollapseLegacyEmoji(replaced)
+	}
+	return replaced
+}
+
+// CollapseLegacyEmoji turns emoji the legacy console cannot draw into one
+// ASCII cell. A missing glyph is often wider or narrower than the width used
+// to wrap the line, which shifts the following text and splits the last word.
+func CollapseLegacyEmoji(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	marked := false
+	flush := func() {
+		if marked {
+			b.WriteByte('*')
+			marked = false
+		}
+	}
+	for _, r := range s {
+		switch {
+		case isLegacyEmojiRune(r):
+			marked = true
+		case marked && (r == 0x200D || r == 0xFE0E || r == 0xFE0F || r == 0x20E3):
+		case r == 0xFE0E || r == 0xFE0F:
+		default:
+			flush()
+			b.WriteRune(r)
+		}
+	}
+	flush()
+	return b.String()
+}
+
+func isLegacyEmojiRune(r rune) bool {
+	switch {
+	case r >= 0x1F000 && r <= 0x1FAFF:
+		return true
+	case r >= 0x2600 && r <= 0x27BF:
+		return true
+	case r >= 0x1F1E6 && r <= 0x1F1FF:
+		return true
+	default:
+		return false
+	}
 }

@@ -13,7 +13,7 @@ import (
 )
 
 // HawkEyeToolProfile is DeepSentry's local contract for the public HawkEye
-// MCP 1.0.7 tool surface. Server annotations remain useful evidence, but this
+// MCP 1.0.12 tool surface. Server annotations remain useful evidence, but this
 // allow-list is what permits action-aware routing and approvals; an arbitrary
 // third-party MCP server cannot become trusted merely by setting readOnlyHint.
 type HawkEyeToolProfile struct {
@@ -65,7 +65,7 @@ func hawkEyeOriginalName(tool *ExternalTool) string {
 }
 
 // HawkEyeKnownToolNames returns a stable copy for contract tests and operator
-// diagnostics. It intentionally lists every public 1.0.7 tool, not just the
+// diagnostics. It intentionally lists every public 1.0.12 tool, not just the
 // small subset most often used in prompts.
 func HawkEyeKnownToolNames() []string {
 	names := make([]string, 0, len(hawkEyeToolProfiles))
@@ -183,9 +183,9 @@ func hawkEyeDropsStructuredDump(name string) bool {
 func HawkEyeToolDescriptionOverlay(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "browser_click":
-		return "DeepSentry: 点最小可交互目标（内层 a/button，不要点包裹卡片）。必须同时传 text=无障碍名称 和 ref；element 只是说明。需要精确匹配时 exact=true。也可用 snapshot 的 stableId。B站倍速不要点菜单，用 hawkeye_evaluate 设 video.playbackRate。全屏优先 press_key key=f inputMode=trusted。清晰度下拉才用 browser_select_option。"
+		return "DeepSentry: 点最小可交互目标（内层 a/button，不要点包裹卡片）。优先传 ref/stableId；需要名称约束时加 text=无障碍名称；element 只是说明。需要精确匹配时 exact=true。也可用 snapshot 的 stableId。B站倍速不要点菜单，用 hawkeye_evaluate 设 video.playbackRate。全屏优先 press_key key=f inputMode=trusted。清晰度下拉才用 browser_select_option。"
 	case "browser_press_key":
-		return "DeepSentry: 全屏按 key=f 且 inputMode=trusted（未传时会自动补 trusted）。先聚焦播放器。用 fullscreenElement 验证。不要用 JS dispatchEvent 伪装 userActivation。"
+		return "DeepSentry: 全屏按 key=f 且 inputMode=trusted（未传时会自动补 trusted）。先聚焦播放器。Chrome 使用 CDP，Firefox 使用本地原生输入；支持 inputMode=native。inputDispatched 不代表操作成功，先用 fullscreenElement 验证，验证失败不要直接重复发送。不要用 JS dispatchEvent 伪装 userActivation。"
 	case "browser_select_option":
 		return "DeepSentry: 清晰度等下拉用这个工具，value 传可见项。B站倍速不要用它，主路径是 hawkeye_evaluate 设置 video.playbackRate=2。不要点装饰箭头后盲点。"
 	case "browser_navigate":
@@ -216,7 +216,7 @@ func HawkEyeToolDescriptionOverlay(name string) string {
 func hawkEyeInteractionHint(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "browser_snapshot", "browser_click", "browser_navigate", "browser_select_option", "browser_press_key", "browser_find", "hawkeye_evaluate":
-		return "[HawkEye] 精确点击: text=无障碍名 + ref，点最小可交互节点。倍速: hawkeye_evaluate 设 video.playbackRate（不要点倍速菜单；清晰度才用 browser_select_option）。全屏: press_key key=f inputMode=trusted。黑屏截图用 canvas.drawImage。翻页只传 page_token。不要 read_file snapshot artifact，不要并行连点同一页。"
+		return "[HawkEye] 精确点击: text=无障碍名 + ref，点最小可交互节点。倍速: hawkeye_evaluate 设 video.playbackRate（不要点倍速菜单；清晰度才用 browser_select_option）。全屏: press_key key=f inputMode=trusted。黑屏截图用 canvas.drawImage。翻页只传 page_token。不要 read_file snapshot artifact，不要并行连点同一页。inputDispatched=true 且 outcomeVerified!=true 时先检查页面，不能盲目重试；导航只返回预览，需要节点时另取 snapshot。"
 	default:
 		return ""
 	}
@@ -227,7 +227,7 @@ func hawkEyeClickMissingTextHint(name string, args map[string]string) string {
 		return ""
 	}
 	if strings.TrimSpace(hawkEyeArg(args, "text")) == "" && strings.TrimSpace(firstNonEmptyMCP(hawkEyeRawArg(args, "ref"), hawkEyeRawArg(args, "stableId"))) != "" {
-		return `[HawkEye] 本次 click 有 ref/stableId 但没有 text=无障碍名称。精确点击会点到包裹卡片。请带上快照里的可见名字重试，例如 text="2.0x" 或 text="全屏"。`
+		return `[HawkEye] 本次 click 有 ref/stableId 但没有 text=无障碍名称。ref/stableId 可单独定位；只有需要精确名称约束时才加 text 并设 exact=true。先核验本次结果，不要仅因缺少 text 就重试。`
 	}
 	return ""
 }
@@ -332,6 +332,14 @@ func hawkEyeStructuredSummary(name string, structured any) string {
 	}
 	if ok, exists := payload["ok"]; exists {
 		fmt.Fprintf(&b, " ok=%v", ok)
+	}
+	for _, key := range []string{"inputDispatched", "outcomeVerified", "category", "error", "hint"} {
+		if value, exists := payload[key]; exists {
+			fmt.Fprintf(&b, " %s=%v", key, value)
+		}
+	}
+	if payload["inputDispatched"] == true && payload["outcomeVerified"] != true {
+		b.WriteString(" （输入已发送，先检查页面状态；不要直接重复点击或按键）")
 	}
 	fmt.Fprintf(&b, " complete=%v", complete)
 	if !complete && nextPageToken != "" && nextPageToken != "<nil>" {

@@ -24,7 +24,7 @@ func TestFormatCatalog(t *testing.T) {
 
 func TestRegistryCount(t *testing.T) {
 	ConfigureEnabled(nil, nil)
-	const releaseToolCount = 73
+	const releaseToolCount = 77
 	if got := CountEnabled(); got != releaseToolCount {
 		t.Fatalf("enabled tool count = %d, want release count %d; update the release docs and this gate together", got, releaseToolCount)
 	}
@@ -64,7 +64,7 @@ func TestFormatCatalogDetail(t *testing.T) {
 		t.Fatal("catalog detail should include archive tools")
 	}
 	proxy := FormatCatalogDetail("代理转发", "")
-	if !strings.Contains(proxy, "tcp_forward") || !strings.Contains(proxy, "socks5_proxy") {
+	if !strings.Contains(proxy, "tcp_forward") || !strings.Contains(proxy, "socks5_proxy") || !strings.Contains(proxy, "http_proxy") {
 		t.Fatal("catalog detail should include proxy forwarding tools")
 	}
 	fleet := FormatCatalogDetail("批量运维", "fleet")

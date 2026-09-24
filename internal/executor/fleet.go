@@ -2,11 +2,12 @@ package executor
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"ai-edr/internal/config"
 )
@@ -28,31 +29,59 @@ type FleetProgress struct {
 
 func MatchTargets(targets []config.TargetConfig, selector string) []config.TargetConfig {
 	selector = strings.TrimSpace(selector)
-	if selector == "" || selector == "all" {
+	if selector == "" || strings.EqualFold(selector, "all") {
 		return targets
-	}
-	parts := strings.Split(selector, ",")
-	want := map[string]bool{}
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			want[p] = true
-		}
 	}
 	var out []config.TargetConfig
 	for _, t := range targets {
-		if want[t.Name] || want[t.Host] || want[t.Protocol] {
-			out = append(out, t)
-			continue
-		}
-		for _, tag := range t.Tags {
-			if want[tag] || want["tag:"+tag] {
+		// Commas narrow a target set; explicit | joins alternative sets.
+		// A union for "prod,ssh" can accidentally run a command on every SSH host.
+		for _, alternative := range strings.Split(selector, "|") {
+			matched := true
+			for _, part := range strings.Split(alternative, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" || !targetMatches(t, part) {
+					matched = false
+					break
+				}
+			}
+			if matched {
 				out = append(out, t)
 				break
 			}
 		}
 	}
 	return out
+}
+
+func targetMatches(t config.TargetConfig, selector string) bool {
+	field, value, qualified := strings.Cut(selector, ":")
+	if qualified && (field == "name" || field == "host" || field == "protocol" || field == "tag") {
+		selector = value
+	} else {
+		field = ""
+	}
+	host, _, err := net.SplitHostPort(t.Host)
+	if err != nil {
+		host = t.Host
+	}
+	if (field == "" || field == "name") && strings.EqualFold(selector, t.Name) {
+		return true
+	}
+	if (field == "" || field == "host") && (strings.EqualFold(selector, t.Host) || strings.EqualFold(selector, host)) {
+		return true
+	}
+	if (field == "" || field == "protocol") && strings.EqualFold(selector, t.Protocol) {
+		return true
+	}
+	if field == "" || field == "tag" {
+		for _, tag := range t.Tags {
+			if strings.EqualFold(selector, tag) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func RunFleet(targets []config.TargetConfig, selector, command string, concurrency int) []FleetResult {
@@ -73,37 +102,35 @@ func RunFleetWithProgressAndStop(targets []config.TargetConfig, selector, comman
 	if concurrency > 20 {
 		concurrency = 20
 	}
-	results := make([]FleetResult, 0, len(selected))
-	var mu sync.Mutex
+	results := make([]FleetResult, len(selected))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, concurrency)
-	recordCanceled := func(target config.TargetConfig) {
+	recordCanceled := func(index int, target config.TargetConfig) {
 		res := FleetResult{Target: target, Error: "已按用户请求取消"}
 		if onProgress != nil {
 			onProgress(FleetProgress{Target: target, Status: "canceled", Error: res.Error})
 		}
-		mu.Lock()
-		results = append(results, res)
-		mu.Unlock()
+		results[index] = res
 	}
-	for _, target := range selected {
+	for index, target := range selected {
+		index := index
 		target := target
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if isStopped(stop) {
-				recordCanceled(target)
+				recordCanceled(index, target)
 				return
 			}
 			select {
 			case sem <- struct{}{}:
 			case <-stop:
-				recordCanceled(target)
+				recordCanceled(index, target)
 				return
 			}
 			defer func() { <-sem }()
 			if isStopped(stop) {
-				recordCanceled(target)
+				recordCanceled(index, target)
 				return
 			}
 			start := time.Now()
@@ -131,13 +158,10 @@ func RunFleetWithProgressAndStop(targets []config.TargetConfig, selector, comman
 				}
 				onProgress(FleetProgress{Target: target, Status: status, Output: out, Error: res.Error})
 			}
-			mu.Lock()
-			results = append(results, res)
-			mu.Unlock()
+			results[index] = res
 		}()
 	}
 	wg.Wait()
-	sort.Slice(results, func(i, j int) bool { return results[i].Target.Name < results[j].Target.Name })
 	return results
 }
 
@@ -320,6 +344,9 @@ func truncateFleetOutput(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.ValidString(s[:n]) {
+		n--
 	}
 	return s[:n] + "\n...(单目标输出已截断)..."
 }

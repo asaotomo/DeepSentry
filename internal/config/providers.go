@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // Provider 预设 LLM 厂商
 type Provider string
@@ -22,6 +25,10 @@ const (
 	ProviderCTYun      Provider = "ctyun"
 	ProviderOllama     Provider = "ollama"
 	ProviderLMStudio   Provider = "lmstudio"
+	ProviderVLLM       Provider = "vllm"
+	ProviderLlamaCPP   Provider = "llamacpp"
+	ProviderSGLang     Provider = "sglang"
+	ProviderLocalAI    Provider = "localai"
 	ProviderXAI        Provider = "xai"
 	ProviderGrok       Provider = "grok"
 	ProviderCustom     Provider = "custom"
@@ -68,7 +75,7 @@ var AllProviders = []ProviderPreset{
 	},
 	{
 		ID: ProviderAnthropic, DisplayName: "Anthropic Claude",
-		APIURL: "https://api.anthropic.com/v1", Model: "claude-fable-5-1",
+		APIURL: "https://api.anthropic.com/v1", Model: "claude-opus-5-5",
 		AuthStyle: "x-api-key", Protocol: ProtocolAnthropicMessages, NativeTools: false,
 	},
 	{
@@ -103,7 +110,7 @@ var AllProviders = []ProviderPreset{
 	},
 	{
 		ID: ProviderMimo, DisplayName: "Xiaomi MiMo Token Plan / MiMo Claw",
-		APIURL: "https://token-plan-cn.xiaomimimo.com/v1", Model: "mimo-v2.5",
+		APIURL: "https://token-plan-cn.xiaomimimo.com/v1", Model: "mimo-v2.6-pro",
 		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: true,
 	},
 	{
@@ -142,13 +149,33 @@ var AllProviders = []ProviderPreset{
 		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: false,
 	},
 	{
+		ID: ProviderVLLM, DisplayName: "vLLM (本地/自托管)",
+		APIURL:    "http://localhost:8000/v1",
+		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: false,
+	},
+	{
+		ID: ProviderLlamaCPP, DisplayName: "llama.cpp server (本地)",
+		APIURL:    "http://localhost:8080/v1",
+		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: false,
+	},
+	{
+		ID: ProviderSGLang, DisplayName: "SGLang (本地/自托管)",
+		APIURL:    "http://localhost:30000/v1",
+		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: false,
+	},
+	{
+		ID: ProviderLocalAI, DisplayName: "LocalAI (本地)",
+		APIURL:    "http://localhost:8080/v1",
+		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: false,
+	},
+	{
 		ID: ProviderXAI, DisplayName: "xAI Grok",
-		APIURL: "https://api.x.ai/v1", Model: "grok-4.6",
+		APIURL: "https://api.x.ai/v1", Model: "grok-4.7",
 		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: true,
 	},
 	{
 		ID: ProviderGrok, DisplayName: "Grok (alias)",
-		APIURL: "https://api.x.ai/v1", Model: "grok-4.6",
+		APIURL: "https://api.x.ai/v1", Model: "grok-4.7",
 		AuthStyle: "bearer", Protocol: ProtocolOpenAIChat, NativeTools: true,
 	},
 }
@@ -170,6 +197,9 @@ var AllModelPresets = []ModelPreset{
 	{Provider: ProviderMiniMax, ID: "MiniMax-M2.7-highspeed", ContextWindowTokens: 204_800},
 	{Provider: ProviderMiniMax, ID: "MiniMax-M2.5", ContextWindowTokens: 204_800},
 	{Provider: ProviderMiniMax, ID: "MiniMax-M2.5-highspeed", ContextWindowTokens: 204_800},
+	{Provider: ProviderMimo, ID: "mimo-v2.6-pro", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderMimo, ID: "mimo-v2.6-flash", ContextWindowTokens: 1_000_000, SupportsVision: true},
+	{Provider: ProviderMimo, ID: "mimo-v2.6-pro-ultraspeed", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderMimo, ID: "mimo-v2.5", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderMimo, ID: "mimo-v2.5-pro", ContextWindowTokens: 1_000_000},
 	{Provider: ProviderMimo, ID: "mimo-v2.5-pro-ultraspeed", ContextWindowTokens: 1_000_000},
@@ -185,6 +215,7 @@ var AllModelPresets = []ModelPreset{
 	{Provider: ProviderOpenAI, ID: "gpt-5.6-terra", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.6-luna", ContextWindowTokens: 1_050_000, SupportsVision: true},
 	{Provider: ProviderOpenAI, ID: "gpt-5.5", ContextWindowTokens: 400_000, SupportsVision: true},
+	{Provider: ProviderAnthropic, ID: "claude-opus-5-5", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderAnthropic, ID: "claude-opus-5", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderAnthropic, ID: "claude-sonnet-5", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderAnthropic, ID: "claude-fable-5-1", ContextWindowTokens: 1_000_000, SupportsVision: true},
@@ -202,6 +233,7 @@ var AllModelPresets = []ModelPreset{
 	{Provider: ProviderQwen, ID: "qwen3.7-plus", ContextWindowTokens: 1_000_000, SupportsVision: true},
 	{Provider: ProviderHunyuan, ID: "hy4-preview", ContextWindowTokens: 1_000_000},
 	{Provider: ProviderHunyuan, ID: "hy3", ContextWindowTokens: 256_000},
+	{Provider: ProviderXAI, ID: "grok-4.7", ContextWindowTokens: 500_000, SupportsVision: true},
 	{Provider: ProviderXAI, ID: "grok-4.6", ContextWindowTokens: 500_000, SupportsVision: true},
 	{Provider: ProviderXAI, ID: "grok-4.5", ContextWindowTokens: 500_000, SupportsVision: true},
 	{Provider: ProviderXAI, ID: "grok-4.3", ContextWindowTokens: 1_000_000, SupportsVision: true},
@@ -298,6 +330,15 @@ func ApplyProviderDefaults(cfg *Config) {
 	}
 	if strings.TrimSpace(cfg.ApiURL) == "" {
 		cfg.ApiURL = preset.APIURL
+	}
+	if IsLocalProvider(p) {
+		// Local OpenAI-compatible servers mount chat routes under /v1. A
+		// host:port-only value must not become the native /chat/completions path.
+		if u, err := url.Parse(cfg.ApiURL); err == nil && u.Host != "" && (u.Path == "" || u.Path == "/") {
+			u.Path = "/v1"
+			u.RawPath = ""
+			cfg.ApiURL = u.String()
+		}
 	}
 	if strings.TrimSpace(cfg.ModelName) == "" {
 		cfg.ModelName = preset.Model
@@ -430,6 +471,17 @@ func NormalizeAPIURL(raw, protocol string) string {
 	return raw + suffix
 }
 
+// IsLocalProvider reports whether a provider serves user-installed model IDs.
+func IsLocalProvider(provider string) bool {
+	switch canonicalProviderID(provider) {
+	case string(ProviderOllama), string(ProviderLMStudio), string(ProviderVLLM),
+		string(ProviderLlamaCPP), string(ProviderSGLang), string(ProviderLocalAI):
+		return true
+	default:
+		return false
+	}
+}
+
 // ProviderModelSuggestions contains currently selectable model IDs. Historical
 // capability entries are intentionally not offered as new configuration choices.
 func ProviderModelSuggestions(provider string) []string {
@@ -440,9 +492,9 @@ func ProviderModelSuggestions(provider string) []string {
 	ids := []string{p.Model}
 	switch p.ID {
 	case ProviderOpenAI:
-		ids = append(ids, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+		ids = append(ids, "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol")
 	case ProviderAnthropic:
-		ids = append(ids, "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
+		ids = append(ids, "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5-20251001")
 	case ProviderGoogle:
 		ids = append(ids, "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
 	case ProviderDeepSeek:
@@ -452,10 +504,10 @@ func ProviderModelSuggestions(provider string) []string {
 	case ProviderMiniMax:
 		ids = append(ids, "MiniMax-M2.7", "MiniMax-M2.7-highspeed")
 	case ProviderMimo:
-		ids = append(ids, "mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed")
+		ids = append(ids, "mimo-v2.6-flash", "mimo-v2.6-pro-ultraspeed")
 	case ProviderGLM:
 		ids = append(ids, "glm-5.3")
-	case ProviderOllama, ProviderLMStudio:
+	case ProviderOllama, ProviderLMStudio, ProviderVLLM, ProviderLlamaCPP, ProviderSGLang, ProviderLocalAI:
 		return nil // installed model IDs are user-specific
 	}
 	return ids

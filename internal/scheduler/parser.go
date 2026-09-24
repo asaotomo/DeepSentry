@@ -20,9 +20,6 @@ var (
 	mdRE            = regexp.MustCompile(`(\d{1,2})月(\d{1,2})[日号]?`)
 	intervalRE      = regexp.MustCompile(`每(?:隔)?\s*(\d+)\s*(分钟|分|小时|时|天|日)`)
 	ipPortRE        = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b`)
-	questionRE      = regexp.MustCompile(`(?i)(?:^|[\s*_#])q\d+\s*[:：]`)
-	hashAnswerRE    = regexp.MustCompile(`(?i)\b[0-9a-f]{32}(?:[0-9a-f]{8}|[0-9a-f]{32})?\b`)
-	logTimestampRE  = regexp.MustCompile(`(?m)^\s*(?:\[?\d{1,2}:\d{2}:\d{2}\]?|\d{4}[-/]\d{1,2}[-/]\d{1,2})`)
 )
 
 func PlanTask(input PlanInput, now time.Time) (Plan, error) {
@@ -40,20 +37,20 @@ func PlanTask(input PlanInput, now time.Time) (Plan, error) {
 	if text == "" {
 		text = strings.TrimSpace(input.Prompt)
 	}
-	if text == "" && strings.TrimSpace(input.RunAt) == "" {
-		return Plan{}, fmt.Errorf("text/task 或 run_at 至少提供一个")
+	if text == "" && strings.TrimSpace(input.RunAt) == "" && strings.TrimSpace(input.IntervalSec) == "" {
+		return Plan{}, fmt.Errorf("text/task、run_at 或 interval_sec 至少提供一个")
 	}
 
 	task := Task{
-		ID:        makeTaskID(text, now),
+		ID:        makeTaskID(text+"\x00"+strings.TrimSpace(input.ReplySession)+"\x00"+input.ReplyText, now),
 		Name:      shortName(firstNonEmpty(input.Prompt, input.Text, "定时任务"), 28),
 		Prompt:    strings.TrimSpace(firstNonEmpty(input.Prompt, input.Text)),
-		Kind:      normalizeKind(firstNonEmpty(input.Kind, inferKind(text))),
-		Selector:  normalizeSelector(input.Selector, text),
+		Kind:      normalizeKind(input.Kind),
+		Selector:  normalizeSelector(input.Selector, ""),
 		Timezone:  tzName,
 		Repeat:    RepeatOnce,
-		Report:    strings.Contains(text, "报告") || strings.Contains(strings.ToLower(text), "report"),
-		Notify:    inferNotify(text),
+		Report:    input.Report != nil && *input.Report,
+		Notify:    NotifyNone,
 		Status:    StatusEnabled,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -77,27 +74,62 @@ func PlanTask(input PlanInput, now time.Time) (Plan, error) {
 		task.Report = *input.Report
 	}
 	task.AllowBatch = input.AllowBatch
+	task.ReplySession = strings.TrimSpace(input.ReplySession)
+	if text, ok := directChatReply(Task{Prompt: task.Prompt, ReplyText: input.ReplyText}); ok {
+		task.ReplyText = text
+	}
+	if input.TimeoutSec != "" {
+		n, e := strconv.Atoi(input.TimeoutSec)
+		if e != nil || n < 1 || n > 604800 {
+			return Plan{}, fmt.Errorf("timeout_sec must be 1..604800")
+		}
+		task.TimeoutSec = n
+	}
 
 	notes := []string{}
-	repeat, weekday, interval := inferRepeat(text)
-	if input.Repeat != "" {
-		repeat, weekday, interval = parseRepeat(input.Repeat, text)
+	repeat, weekday, interval := RepeatOnce, 0, 0
+	if strings.TrimSpace(input.Repeat) != "" {
+		repeat, weekday, interval, err = parseRepeat(input.Repeat)
+		if err != nil {
+			return Plan{}, err
+		}
+	}
+	if spec := strings.TrimSpace(input.IntervalSec); spec != "" {
+		sec, err := ParseIntervalSpec(spec)
+		if err != nil {
+			return Plan{}, err
+		}
+		repeat, weekday, interval = RepeatInterval, 0, sec
 	}
 	task.Repeat = repeat
 	task.Weekday = weekday
 	task.IntervalSec = interval
-
-	runAt, timeNotes, err := parseRunTime(firstNonEmpty(input.RunAt, text), now, loc, task.Repeat, task.Weekday, task.IntervalSec)
-	if err != nil {
-		return Plan{}, err
+	if task.Repeat == RepeatInterval && (task.IntervalSec < minIntervalSec || task.IntervalSec > maxIntervalSec) {
+		return Plan{}, fmt.Errorf("周期必须在 60 秒到 7 天之间")
 	}
-	task.RunAt = runAt
-	notes = append(notes, timeNotes...)
+
+	switch {
+	case task.Repeat == RepeatInterval && task.IntervalSec > 0 && strings.TrimSpace(input.RunAt) == "":
+		task.RunAt = now.Add(time.Duration(task.IntervalSec) * time.Second)
+		notes = append(notes, fmt.Sprintf("已按周期 %d 秒安排，首次执行在一个周期后", task.IntervalSec))
+	case strings.TrimSpace(input.RunAt) != "":
+		runAt, timeNotes, err := parseRunTime(input.RunAt, now, loc, task.Repeat, task.Weekday, task.IntervalSec)
+		if err != nil {
+			return Plan{}, err
+		}
+		task.RunAt = runAt
+		notes = append(notes, timeNotes...)
+	default:
+		return Plan{}, fmt.Errorf("不会从任务正文猜测执行时间。周期请提供 interval_sec（每分钟=60），单次或定点请提供 run_at")
+	}
 	if task.Kind == KindInspection {
 		task.Report = true
 		notes = append(notes, "巡检类任务优先使用 inspection.devices 设备检查项生成 Word/Markdown；未配置时只做基础状态采集")
 	}
-	if task.Kind == KindAgent && !task.AllowBatch {
+	if task.ReplyText != "" {
+		notes = append(notes, "到点会把这句话直接发进当前聊天，不另起一轮报告: "+task.ReplyText)
+	}
+	if task.Kind == KindAgent && !task.AllowBatch && task.ReplyText == "" {
 		notes = append(notes, "泛化 Agent 定时任务默认不会无人值守执行；如确需 batch，创建时显式 allow_batch=true")
 	}
 	for _, ch := range NotifyChannels(task.Notify) {
@@ -113,67 +145,6 @@ func PlanTask(input PlanInput, now time.Time) (Plan, error) {
 	return Plan{Task: task, Notes: notes}, nil
 }
 
-func ParseNaturalAt(text string, now time.Time, loc *time.Location) (Task, []string, error) {
-	if loc == nil {
-		loc = time.Local
-	}
-	plan, err := PlanTask(PlanInput{Text: text, Timezone: loc.String()}, now.In(loc))
-	return plan.Task, plan.Notes, err
-}
-
-func LooksLikeSchedule(text string) bool {
-	ok, _ := DetectScheduleIntent(text)
-	return ok
-}
-
-// DetectScheduleIntent is deliberately conservative because a positive result
-// takes the native mutation path and persists a job without an LLM round-trip.
-// Time words plus generic verbs are not enough: the user must also express a
-// scheduling request, a relative delay, or a recurring cadence.
-func DetectScheduleIntent(text string) (bool, string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return false, "空输入"
-	}
-	if looksLikeAnswerOrMaliciousArtifact(text) {
-		return false, "更像答案、日志或取证材料"
-	}
-	hasTime := containsAny(text, "明天", "后天", "今天", "今晚", "每天", "每日", "每周", "每星期", "每礼拜", "每隔", "分钟后", "小时后", "天后")
-	if !hasTime && (ymdRE.MatchString(text) || mdRE.MatchString(text)) {
-		hasTime = true
-	}
-	if !hasTime {
-		_, _, hasTime = extractClock(text)
-	}
-	if !hasTime {
-		return false, "未识别到可靠的未来时间"
-	}
-	hasTask := containsAny(strings.ToLower(text), "提醒", "巡检", "检查", "执行", "运行", "跑", "生成", "备份", "汇总", "总结", "同步", "通知", "发送", "发钉钉", "钉钉", "飞书", "邮件", "邮箱", "email", "mail")
-	if !hasTask {
-		return false, "未识别到要调度的任务"
-	}
-
-	lower := strings.ToLower(text)
-	explicit := containsAny(lower, "创建定时任务", "添加定时任务", "设置定时任务", "定时执行", "定时运行", "设置提醒", "设个提醒", "提醒我", "帮我提醒", "安排在", "计划在", "到点提醒", "schedule", "remind me")
-	requested := containsAny(lower, "帮我", "请帮我", "请在", "请于", "请明天", "请后天", "麻烦在", "麻烦帮我", "我要你", "我想让你")
-	relative := relativeAfterRE.MatchString(text) || strings.Contains(text, "半小时后")
-	recurring := containsAny(text, "每天", "每日", "每周", "每星期", "每礼拜", "每隔")
-	trimmed := strings.TrimSpace(text)
-	directRelative := relative && startsWithRelativeTime(trimmed) && !containsAny(text, "结果", "显示", "记录", "日志", "会在", "已经")
-	directRecurring := recurring && hasAnyPrefix(trimmed, "每天", "每日", "每周", "每星期", "每礼拜", "每隔") && !containsAny(text, "会在", "已经", "原本", "当前", "日志显示", "配置为", "脚本在", "程序在")
-	if explicit || requested || directRelative || directRecurring {
-		reason := "显式调度请求"
-		switch {
-		case recurring:
-			reason = "显式重复周期"
-		case relative:
-			reason = "显式相对延时"
-		}
-		return true, reason
-	}
-	return false, "只出现了时间和动作词，没有明确要求创建调度"
-}
-
 func containsAny(text string, needles ...string) bool {
 	for _, needle := range needles {
 		if strings.Contains(text, needle) {
@@ -183,52 +154,8 @@ func containsAny(text string, needles ...string) bool {
 	return false
 }
 
-func hasAnyPrefix(text string, prefixes ...string) bool {
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(text, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func startsWithRelativeTime(text string) bool {
-	if strings.HasPrefix(text, "半小时后") {
-		return true
-	}
-	idx := relativeAfterRE.FindStringIndex(text)
-	return len(idx) == 2 && idx[0] == 0
-}
-
-func looksLikeAnswerOrMaliciousArtifact(text string) bool {
-	lower := strings.ToLower(text)
-	// Security challenge answers often contain labels such as "Q10：", an
-	// answer marker and a hash.  They may also contain words like "执行", which
-	// are schedule action verbs, so reject this shape before looking for time.
-	if questionRE.MatchString(text) && (strings.Contains(text, "答案") || strings.Contains(lower, "answer")) {
-		return true
-	}
-	if hashAnswerRE.MatchString(text) && (strings.Contains(text, "答案") || strings.Contains(lower, "md5") || strings.Contains(lower, "sha")) {
-		return true
-	}
-	if strings.Count(text, "\n") >= 3 && !containsAny(lower, "创建定时任务", "设置定时任务", "设置提醒", "schedule", "remind me") {
-		return true
-	}
-	if logTimestampRE.MatchString(text) || strings.Contains(text, "HTTP/1.") || strings.Contains(text, "```") {
-		return true
-	}
-	if ipPortRE.MatchString(text) {
-		for _, needle := range []string{"回连", "反连", "reverse shell", "callback", "connect back", "提交", "答案", "flag"} {
-			if strings.Contains(lower, needle) || strings.Contains(text, needle) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func parseRunTime(raw string, now time.Time, loc *time.Location, repeat string, weekday, intervalSec int) (time.Time, []string, error) {
-	raw = strings.TrimSpace(raw)
+	raw = normalizeDelayWords(strings.TrimSpace(raw))
 	if raw == "" {
 		return time.Time{}, nil, fmt.Errorf("无法识别执行时间")
 	}
@@ -280,8 +207,11 @@ func parseRunTime(raw string, now time.Time, loc *time.Location, repeat string, 
 	}
 
 	hour, minute, ok := extractClock(raw)
+	if !ok && repeat == RepeatInterval && intervalSec > 0 {
+		return now.Add(time.Duration(intervalSec) * time.Second), []string{"首次执行在一个周期后；后续保持周期"}, nil
+	}
 	if !ok {
-		return time.Time{}, nil, fmt.Errorf("无法识别执行时间，请提供类似 明天9点 / 2026-06-27 09:00 / 10分钟后")
+		return time.Time{}, nil, fmt.Errorf("无法识别执行时间。周期请给 interval_sec（每分钟=60）或 repeat=interval；单次请给 run_at，例如 2026-06-27 09:00 或 10分钟后")
 	}
 	runAt := time.Date(date.Year(), date.Month(), date.Day(), hour, minute, 0, 0, loc)
 	if !runAt.After(now) {
@@ -387,37 +317,37 @@ func clockMatchIsEmbedded(raw string, start, end int) bool {
 	return false
 }
 
-func inferRepeat(text string) (string, int, int) {
-	switch {
-	case strings.Contains(text, "每天") || strings.Contains(text, "每日"):
-		return RepeatDaily, 0, 0
-	case strings.Contains(text, "每周") || strings.Contains(text, "每星期") || strings.Contains(text, "每礼拜"):
-		return RepeatWeekly, inferWeekday(text), 0
+func parseRepeat(raw string) (string, int, int, error) {
+	raw = strings.TrimSpace(raw)
+	if sec, ok := exactBareInterval(raw); ok {
+		return RepeatInterval, 0, sec, nil
 	}
-	if m := intervalRE.FindStringSubmatch(text); len(m) == 3 {
-		n, _ := strconv.Atoi(m[1])
-		return RepeatInterval, 0, int(durationForUnit(n, m[2]).Seconds())
+	if sec, err := ParseIntervalSpec(raw); err == nil {
+		return RepeatInterval, 0, sec, nil
 	}
-	return RepeatOnce, 0, 0
-}
-
-func parseRepeat(raw, text string) (string, int, int) {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	switch raw {
+	lower := strings.ToLower(raw)
+	if lower == RepeatInterval {
+		return RepeatInterval, 0, 0, nil
+	}
+	switch lower {
 	case "", RepeatOnce:
-		return RepeatOnce, 0, 0
+		return RepeatOnce, 0, 0, nil
 	case RepeatDaily, "day", "每天", "每日":
-		return RepeatDaily, 0, 0
+		return RepeatDaily, 0, 0, nil
 	case RepeatWeekly, "week", "每周":
-		return RepeatWeekly, inferWeekday(text), 0
+		return RepeatWeekly, inferWeekday(raw), 0, nil
 	}
-	if strings.HasPrefix(raw, "interval:") {
-		sec, _ := strconv.Atoi(strings.TrimPrefix(raw, "interval:"))
+	if strings.HasPrefix(lower, "interval:") {
+		sec, _ := strconv.Atoi(strings.TrimPrefix(lower, "interval:"))
 		if sec > 0 {
-			return RepeatInterval, 0, sec
+			return RepeatInterval, 0, sec, nil
 		}
 	}
-	return inferRepeat(text + raw)
+	if m := intervalRE.FindStringSubmatch(raw); len(m) == 3 && strings.TrimSpace(m[0]) == strings.TrimSpace(raw) {
+		n, _ := strconv.Atoi(m[1])
+		return RepeatInterval, 0, int(durationForUnit(n, m[2]).Seconds()), nil
+	}
+	return "", 0, 0, fmt.Errorf("repeat 无法识别。请用 once、daily、weekly、interval，或直接提供 interval_sec")
 }
 
 func inferWeekday(text string) int {
@@ -468,15 +398,6 @@ func durationForUnit(n int, unit string) time.Duration {
 	}
 }
 
-func inferKind(text string) string {
-	for _, needle := range []string{"巡检", "健康检查", "服务器检查", "可用性检查", "体检"} {
-		if strings.Contains(text, needle) {
-			return KindInspection
-		}
-	}
-	return KindAgent
-}
-
 func normalizeKind(kind string) string {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	switch kind {
@@ -487,24 +408,6 @@ func normalizeKind(kind string) string {
 	default:
 		return KindAgent
 	}
-}
-
-func inferNotify(text string) string {
-	lower := strings.ToLower(text)
-	channels := []string{}
-	if strings.Contains(text, "钉钉") || strings.Contains(lower, "dingtalk") {
-		channels = append(channels, NotifyDingTalk)
-	}
-	if strings.Contains(text, "飞书") || strings.Contains(lower, "feishu") || strings.Contains(lower, "lark") {
-		channels = append(channels, NotifyFeishu)
-	}
-	if strings.Contains(text, "邮件") || strings.Contains(text, "邮箱") || strings.Contains(lower, "email") || strings.Contains(lower, "mail") {
-		channels = append(channels, NotifyEmail)
-	}
-	if len(channels) == 0 {
-		return NotifyNone
-	}
-	return strings.Join(dedupeNotifyChannels(channels), ",")
 }
 
 func normalizeNotify(notify string) string {
@@ -601,6 +504,97 @@ func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func normalizeDelayWords(s string) string {
+	return strings.NewReplacer("两小时后", "2小时后", "两个小时后", "2小时后", "一小时后", "1小时后", "一个小时后", "1小时后").Replace(s)
+}
+
+const (
+	minIntervalSec = 60
+	maxIntervalSec = 604800
+)
+
+var (
+	intervalSpecRE      = regexp.MustCompile(`(?i)^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hour|d|day)?$`)
+	bareIntervalPhrases = []struct {
+		phrase string
+		sec    int
+	}{
+		{"每半个小时", 1800},
+		{"每半小时", 1800},
+		{"每一个小时", 3600},
+		{"每个小时", 3600},
+		{"每一小时", 3600},
+		{"每小时", 3600},
+		{"每钟头", 3600},
+		{"每一分钟", 60},
+		{"每个分钟", 60},
+		{"每分钟", 60},
+	}
+)
+
+func exactBareInterval(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	for _, phrase := range bareIntervalPhrases {
+		if raw == phrase.phrase {
+			return phrase.sec, true
+		}
+	}
+	return 0, false
+}
+
+func ParseIntervalSpec(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(strings.ToLower(raw), "interval:")
+	raw = strings.TrimSpace(raw)
+	if sec, ok := exactBareInterval(raw); ok {
+		return sec, nil
+	}
+	m := intervalSpecRE.FindStringSubmatch(raw)
+	if m == nil {
+		return 0, fmt.Errorf("无法识别周期 %q，例如 60、1m、30m、1h、每分钟", raw)
+	}
+	n, _ := strconv.Atoi(m[1])
+	if n <= 0 {
+		return 0, fmt.Errorf("周期必须大于 0")
+	}
+	sec := n
+	switch strings.ToLower(m[2]) {
+	case "", "s", "sec", "secs":
+		sec = n
+	case "m", "min", "mins":
+		sec = n * 60
+	case "h", "hr", "hour":
+		sec = n * 3600
+	case "d", "day":
+		sec = n * 86400
+	}
+	if sec < minIntervalSec || sec > maxIntervalSec {
+		return 0, fmt.Errorf("周期必须在 60 秒到 7 天之间，当前 %d 秒", sec)
+	}
+	return sec, nil
+}
+
+func UnattendedPromptRisk(prompt string) string {
+	text := strings.TrimSpace(prompt)
+	if text == "" {
+		return "任务内容为空"
+	}
+	lower := strings.ToLower(text)
+	if ipPortRE.MatchString(text) {
+		for _, needle := range []string{"回连", "反连", "reverse shell", "callback", "connect back"} {
+			if strings.Contains(lower, needle) || strings.Contains(text, needle) {
+				return "任务文本包含回连/反连语义和 IP:端口，像是攻击取证答案而不是授权自动化任务"
+			}
+		}
+	}
+	for _, needle := range []string{"恶意回连", "反弹 shell", "reverse shell", "木马", "后门", "持久化", "篡改系统命令"} {
+		if strings.Contains(lower, needle) || strings.Contains(text, needle) {
+			return "任务文本包含高危攻击/持久化语义"
 		}
 	}
 	return ""

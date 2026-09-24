@@ -2,11 +2,8 @@ package inspection
 
 import (
 	"archive/zip"
-	"bytes"
 	"fmt"
 	"image"
-	"image/color"
-	"image/png"
 	"os"
 	"strings"
 	"time"
@@ -63,10 +60,6 @@ func headingFonts() string {
 
 func uiFonts() string {
 	return `<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="微软雅黑" w:cs="Calibri"/>`
-}
-
-func coverBrandFonts() string {
-	return `<w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:eastAsia="微软雅黑" w:cs="Calibri Light"/>`
 }
 
 func coverTitleFonts() string {
@@ -128,69 +121,9 @@ func reportTime(t time.Time) string {
 	return t.Format("2006-01-02 15:04:05 -0700")
 }
 
-func (d *docxDoc) nextCoverImage() int {
-	d.pictureID++
-	d.media[fmt.Sprintf("word/media/image%d.png", d.pictureID)] = navyPNG()
-	return d.pictureID
-}
-
-func navyPNG() []byte {
-	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
-	fill := color.RGBA{0x0E, 0x23, 0x44, 0xFF}
-	for y := 0; y < 16; y++ {
-		for x := 0; x < 16; x++ {
-			img.SetRGBA(x, y, fill)
-		}
-	}
-	var b bytes.Buffer
-	_ = png.Encode(&b, img)
-	return b.Bytes()
-}
-
-func coverBackground(id int) string {
-	cx := itoa(docxPageW * docxEMU)
-	cy := itoa(docxPageH * docxEMU)
-	rid := fmt.Sprintf("rIdImg%d", id)
-	return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="1" locked="1" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="` + cx + `" cy="` + cy + `"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="` + itoa(id) + `" name="CoverFill"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="` + itoa(id) + `" name="CoverFill"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="` + rid + `"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="` + cx + `" cy="` + cy + `"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>`
-}
-
-func coverTblPr() string {
-	return `<w:tblW w:w="` + itoa(docxPageW) + `" w:type="dxa"/><w:jc w:val="center"/><w:tblInd w:w="0" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="0"/><w:left w:w="0"/><w:bottom w:w="0"/><w:right w:w="0"/></w:tblCellMar><w:tblBorders>` + tblBorder(docxNavy, 0) + `</w:tblBorders>`
-}
-
-func coverBand(height int, fill string, topPad, leftPad int, lines []string) string {
-	var b strings.Builder
-	b.WriteString(`<w:tr><w:trPr><w:trHeight w:val="` + itoa(height) + `" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="` + itoa(docxPageW) + `" w:type="dxa"/><w:shd w:val="clear" w:fill="` + fill + `"/><w:tcMar><w:top w:w="` + itoa(topPad) + `"/><w:left w:w="` + itoa(leftPad) + `"/><w:bottom w:w="200"/><w:right w:w="` + itoa(leftPad) + `"/></w:tcMar></w:tcPr>`)
-	for _, line := range lines {
-		b.WriteString(line)
-	}
-	b.WriteString(`</w:tc></w:tr>`)
-	return b.String()
-}
-
-func coverLine(fonts string, sz int, color string, bold bool, after int, text string) string {
-	rpr := fonts + fmt.Sprintf(`<w:sz w:val="%d"/><w:szCs w:val="%d"/><w:color w:val="%s"/>`, sz, sz, color)
-	if bold {
-		rpr += `<w:b/>`
-	}
-	return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="` + itoa(after) + `"/></w:pPr><w:r><w:rPr>` + rpr + `</w:rPr><w:t xml:space="preserve">` + xmlText(text) + `</w:t></w:r></w:p>`
-}
-
-func coverRule() string {
-	return `<w:p><w:pPr><w:jc w:val="center"/><w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="` + docxGold + `"/></w:pBdr><w:spacing w:before="120" w:after="280"/><w:ind w:left="2200" w:right="2200"/></w:pPr></w:p>`
-}
-
-func coverSectPr() string {
-	return `<w:pgSz w:w="` + itoa(docxPageW) + `" w:h="` + itoa(docxPageH) + `"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0"/>`
-}
-
 func (d *docxDoc) heading(level int, text string) {
 	style := fmt.Sprintf("Heading%d", level)
 	d.body.WriteString(`<w:p><w:pPr><w:pStyle w:val="` + style + `"/></w:pPr><w:r><w:rPr>` + headingFonts() + `</w:rPr><w:t xml:space="preserve">` + xmlText(text) + `</w:t></w:r></w:p>`)
-}
-
-func (d *docxDoc) para(text string) {
-	d.richPara(text)
 }
 
 func (d *docxDoc) richPara(text string) {

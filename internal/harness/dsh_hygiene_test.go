@@ -59,6 +59,50 @@ func TestSkillsMiddlewareAutoLoadPinsZipRecoverTool(t *testing.T) {
 	}
 }
 
+func TestSkillsMiddlewareDoesNotAutoLoadExplicitOnlyZipSkill(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "zipcracker")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "---\nname: zipcracker\ndescription: ZIP password recovery\ndisable-model-invocation: true\n---\n# ZIP\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := skills.LoadCatalog([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := NewAgentState(root)
+	loaded := NewSkillsMiddleware(catalog).AutoLoadForQuery(state, "解开 test04.zip")
+	if len(loaded) != 0 || len(state.LoadedSkills) != 0 {
+		t.Fatalf("explicit-only ZIP Skill was automatically loaded: %#v %#v", loaded, state.LoadedSkills)
+	}
+}
+
+func TestSkillsMiddlewareCanReturnAlreadyLoadedContent(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "audit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "---\nname: audit\ndescription: Audit workflow\n---\n# CHECKPOINT-KEEP\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := skills.LoadCatalog([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := NewAgentState(root)
+	state.LoadedSkills["audit"] = doc
+	mw := NewSkillsMiddleware(catalog)
+	result, handled, err := mw.HandleAction(&StepContext{State: state}, &AgentAction{Type: ActionLoadSkill, SkillName: "audit"})
+	if err != nil || !handled || result == nil || !strings.Contains(result.Output, "CHECKPOINT-KEEP") {
+		t.Fatalf("reloading an already loaded Skill should return its content: result=%#v handled=%v err=%v", result, handled, err)
+	}
+}
+
 func TestNormalizeSkillActionMapsNativeSkillTool(t *testing.T) {
 	action := &AgentAction{Type: ActionTool, ToolName: "skill", ToolArgs: map[string]string{"name": "fofamap"}}
 	normalizeSkillAction(action)
@@ -83,6 +127,48 @@ func TestLoopBeforeExecuteSkipsIdenticalFailedCall(t *testing.T) {
 	decision := state.LoopBeforeExecute(action)
 	if decision.Allow || !strings.Contains(decision.Warning, "拒绝再次执行") {
 		t.Fatalf("identical failed probe must be skipped before execute: %#v", decision)
+	}
+}
+
+func TestActionFingerprintDistinguishesDelegationsAndFileChanges(t *testing.T) {
+	baseTask := AgentAction{Type: ActionTask, TaskName: "log-analyst", TaskPrompt: "检查认证日志", TargetSelector: "server-a"}
+	changedTask := baseTask
+	changedTask.TaskPrompt = "检查 Web 日志"
+	if actionFingerprint(baseTask) == actionFingerprint(changedTask) {
+		t.Fatal("different sub-agent assignments share a loop fingerprint")
+	}
+	changedTask = baseTask
+	changedTask.TargetSelector = "server-b"
+	if actionFingerprint(baseTask) == actionFingerprint(changedTask) {
+		t.Fatal("different target scopes share a loop fingerprint")
+	}
+	state := NewAgentState(t.TempDir())
+	state.LoopAfterExecute(baseTask, "first evidence", false)
+	state.LoopAfterExecute(baseTask, "second evidence", false)
+	if decision := state.LoopBeforeExecute(changedTask); !decision.Allow {
+		t.Fatalf("distinct delegation was blocked as a duplicate: %#v", decision)
+	}
+
+	write := AgentAction{Type: ActionWriteFile, Path: "/tmp/config", Content: "value=one"}
+	otherWrite := write
+	otherWrite.Content = "value=two"
+	if actionFingerprint(write) == actionFingerprint(otherWrite) {
+		t.Fatal("different file contents share a loop fingerprint")
+	}
+	edit := AgentAction{Type: ActionEditFile, Path: "/tmp/config", OldString: "one", NewString: "two"}
+	otherEdit := edit
+	otherEdit.NewString = "three"
+	if actionFingerprint(edit) == actionFingerprint(otherEdit) {
+		t.Fatal("different edits share a loop fingerprint")
+	}
+	longPrefix := strings.Repeat("x", 100)
+	firstCommand := AgentAction{Type: ActionExecute, Command: "echo " + longPrefix + "a"}
+	secondCommand := AgentAction{Type: ActionExecute, Command: "echo " + longPrefix + "b"}
+	if actionFingerprint(firstCommand) == actionFingerprint(secondCommand) {
+		t.Fatal("long commands differing after the old truncation limit collided")
+	}
+	if strings.Contains(actionFingerprint(firstCommand), longPrefix) {
+		t.Fatal("command text leaked into loop fingerprint")
 	}
 }
 

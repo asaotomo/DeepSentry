@@ -118,14 +118,24 @@ func (s *Service) sendChunk(ctx context.Context, c config.ChatChannel, m Message
 		_, err = s.request(ctx, "POST", "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", token, map[string]string{"receive_id": m.Chat, "msg_type": "text", "content": string(content)})
 		return err
 	case "dingtalk":
-		if m.ReplyExpires > 0 && time.Now().UnixMilli() >= m.ReplyExpires {
+		active := func() error {
 			token, err := s.dingToken(ctx, c)
 			if err != nil {
 				return err
 			}
 			return s.sendDingTemplate(ctx, c, m, token, "sampleText", map[string]string{"content": text})
 		}
+		if m.ReplyURL == "" || (m.ReplyExpires > 0 && time.Now().UnixMilli() >= m.ReplyExpires) {
+			return active()
+		}
 		_, err := s.request(ctx, "POST", m.ReplyURL, "", map[string]any{"msgtype": "text", "text": map[string]string{"content": text}})
+		// Some events omit sessionWebhookExpiredTime. When the webhook then
+		// fails, the application API is the only way the result still arrives.
+		if err != nil && m.ReplyExpires == 0 && c.AppID != "" && secret(c) != "" {
+			if fallbackErr := active(); fallbackErr == nil {
+				return nil
+			}
+		}
 		return err
 	case "wecom":
 		endpoint := "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=" + url.QueryEscape(c.AppID) + "&corpsecret=" + url.QueryEscape(os.Getenv(c.SecretEnv))

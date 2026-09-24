@@ -3,11 +3,14 @@ package builtin
 import (
 	"ai-edr/internal/config"
 	"fmt"
+	"html"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -40,7 +43,21 @@ func FlagScan(rt Runtime, root, pattern string, limit int) (string, error) {
 }
 
 func AWDServiceCheck(_ Runtime, targets string, timeoutSec int) (string, error) {
-	targetList := strings.FieldsFunc(targets, func(r rune) bool { return r == ',' || r == '\n' || r == ';' })
+	return AWDServiceCheckWithOptions(targets, timeoutSec, 10, 0, "")
+}
+
+var awdTitlePattern = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title\s*>`)
+
+// AWDServiceCheckWithOptions probes services concurrently but reports them in
+// input order, so a slow/down host cannot hide the rest of the fleet.
+func AWDServiceCheckWithOptions(targets string, timeoutSec, concurrency, expectedStatus int, contains string) (string, error) {
+	rawTargets := strings.FieldsFunc(targets, func(r rune) bool { return r == ',' || r == '\n' || r == ';' })
+	targetList := make([]string, 0, len(rawTargets))
+	for _, raw := range rawTargets {
+		if target := strings.TrimSpace(raw); target != "" {
+			targetList = append(targetList, target)
+		}
+	}
 	if len(targetList) == 0 {
 		return "", fmt.Errorf("targets 不能为空")
 	}
@@ -49,47 +66,103 @@ func AWDServiceCheck(_ Runtime, targets string, timeoutSec int) (string, error) 
 	}
 	timeout := time.Duration(timeoutSec) * time.Second
 	client := config.HTTPClient(timeout)
+	// Preserve the status of the configured service endpoint. Following a
+	// redirect to a login page would make expected_status=302 impossible.
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	defer client.CloseIdleConnections()
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+	if concurrency > 32 {
+		concurrency = 32
+	}
+	type probeResult struct {
+		status string
+		detail string
+	}
+	results := make([]probeResult, len(targetList))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i, target := range targetList {
+		wg.Add(1)
+		go func(i int, target string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			started := time.Now()
+			status, detail := probeAWDService(client, target, timeout, expectedStatus, contains)
+			results[i] = probeResult{status: status, detail: fmt.Sprintf("%s latency=%s", detail, time.Since(started).Round(time.Millisecond))}
+		}(i, target)
+	}
+	wg.Wait()
 	var b strings.Builder
 	b.WriteString("【AWD 服务可用性】\n")
-	up := 0
-	for _, raw := range targetList {
-		target := strings.TrimSpace(raw)
-		if target == "" {
-			continue
-		}
-		started := time.Now()
-		if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-			request, _ := http.NewRequest(http.MethodGet, target, nil)
-			response, err := client.Do(request)
-			if err != nil {
-				fmt.Fprintf(&b, "- %s DOWN error=%v latency=%s\n", target, err, time.Since(started).Round(time.Millisecond))
-				continue
-			}
-			_ = response.Body.Close()
-			up++
-			fmt.Fprintf(&b, "- %s HTTP %d latency=%s\n", target, response.StatusCode, time.Since(started).Round(time.Millisecond))
-			continue
-		}
-		host, port, err := net.SplitHostPort(target)
-		if err != nil || strings.TrimSpace(host) == "" {
-			fmt.Fprintf(&b, "- %s INVALID（请使用 URL 或 host:port）\n", target)
-			continue
-		}
-		if parsedPort, parseErr := strconv.Atoi(port); parseErr != nil || parsedPort < 1 || parsedPort > 65535 {
-			fmt.Fprintf(&b, "- %s INVALID port\n", target)
-			continue
-		}
-		conn, err := config.ControllerDialTimeout("tcp", net.JoinHostPort(host, port), timeout)
-		if err != nil {
-			fmt.Fprintf(&b, "- %s DOWN error=%v latency=%s\n", target, err, time.Since(started).Round(time.Millisecond))
-			continue
-		}
-		_ = conn.Close()
-		up++
-		fmt.Fprintf(&b, "- %s TCP OPEN latency=%s\n", target, time.Since(started).Round(time.Millisecond))
+	counts := map[string]int{}
+	for i, target := range targetList {
+		result := results[i]
+		counts[result.status]++
+		fmt.Fprintf(&b, "- %s %s %s\n", target, result.status, result.detail)
 	}
-	fmt.Fprintf(&b, "汇总: UP=%d TOTAL=%d", up, len(targetList))
+	fmt.Fprintf(&b, "汇总: UP=%d WARN=%d DOWN=%d INVALID=%d TOTAL=%d", counts["UP"], counts["WARN"], counts["DOWN"], counts["INVALID"], len(targetList))
 	return strings.TrimSpace(b.String()), nil
+}
+
+func probeAWDService(client *http.Client, target string, timeout time.Duration, expectedStatus int, contains string) (string, string) {
+	if strings.HasPrefix(strings.ToLower(target), "http://") || strings.HasPrefix(strings.ToLower(target), "https://") {
+		request, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			return "INVALID", "error=" + err.Error()
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return "DOWN", "error=" + err.Error()
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(response.Body, 128<<10))
+		if err != nil {
+			return "DOWN", fmt.Sprintf("HTTP %d read_error=%v", response.StatusCode, err)
+		}
+		status := "UP"
+		if response.StatusCode >= 500 {
+			status = "DOWN"
+		} else if response.StatusCode >= 400 {
+			status = "WARN"
+		}
+		if expectedStatus != 0 {
+			if response.StatusCode == expectedStatus {
+				status = "UP"
+			} else if status == "UP" {
+				status = "WARN"
+			}
+		}
+		detail := fmt.Sprintf("HTTP %d", response.StatusCode)
+		if matches := awdTitlePattern.FindSubmatch(body); len(matches) > 1 {
+			title := strings.Join(strings.Fields(html.UnescapeString(string(matches[1]))), " ")
+			if title != "" {
+				detail += " title=" + strconv.Quote(truncate(title, 100))
+			}
+		}
+		if contains != "" && !strings.Contains(string(body), contains) {
+			if status == "UP" {
+				status = "WARN"
+			}
+			detail += " expected_text_missing=true"
+		}
+		return status, detail
+	}
+	host, port, err := net.SplitHostPort(target)
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "INVALID", "请使用 URL 或 host:port"
+	}
+	if parsedPort, parseErr := strconv.Atoi(port); parseErr != nil || parsedPort < 1 || parsedPort > 65535 {
+		return "INVALID", "port 无效"
+	}
+	conn, err := config.ControllerDialTimeout("tcp", net.JoinHostPort(host, port), timeout)
+	if err != nil {
+		return "DOWN", "error=" + err.Error()
+	}
+	_ = conn.Close()
+	return "UP", "TCP OPEN"
 }
 
 // CompetitionAnswerCheck is a deterministic pre-submit rubric check. It does

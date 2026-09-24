@@ -114,6 +114,7 @@ var slashCommands = []slashCommand{
 	{Name: "connect", Description: "连接通讯工具：扫码绑定飞书/QQ/微信/企微，钉钉可手动配置；Ctrl+C 返回终端并保持后台聊天"},
 	{Name: "mcp", Description: "MCP 管理：/mcp status|reconnect|add|import|resources|prompts"},
 	{Name: "skill", Description: "Skill 管理：list 查看；on/off [name] 启停；only <name> 仅启用一个"},
+	{Name: "schedule", Description: "定时任务：/schedule [list|show|edit|cancel|resume|reset|delete]"},
 	{Name: "exit", Description: "退出 TUI"},
 	{Name: "quit", Description: "退出 TUI"},
 }
@@ -160,7 +161,8 @@ type inputDraftPart struct {
 
 // AgentModel 主 Agent TUI（多轮对话 + 子 Agent 面板）
 type AgentModel struct {
-	ctrl *SessionController
+	mouseInput mouseInputFilter
+	ctrl       *SessionController
 
 	width, height    int
 	viewport         viewport.Model
@@ -175,6 +177,8 @@ type AgentModel struct {
 	lines          []logLine
 	lineID         int
 	streamIdx      int // 当前流式行索引，-1 表示无
+	streamRaw      []byte
+	streamDirty    bool
 	cmdOutputGroup int
 	activeCmdGroup int
 	streamTick     bool
@@ -190,12 +194,18 @@ type AgentModel struct {
 	stopping       bool
 	inputHistory   []string
 	historyIdx     int
+	inputUndo      []inputUndoSnap
+	dropInputUndo  bool
+	lastClipPaste  time.Time
 	draftParts     []inputDraftPart
 	draftImages    []analyzer.ImageAttachment
 	slashSelected  int
 	cursorAnchor   *inputCursorAnchorState
 	footerVersion  uint64
 	frameVersion   uint64
+	inboxOffset    int64
+	inboxPrimed    bool
+	scheduleStatus string
 
 	pendingConfirm *confirmState
 	pendingAsk     *askState
@@ -260,11 +270,16 @@ func (m *AgentModel) startConfiguredChatIfNeeded() string {
 
 func NewAgentModel(ctrl *SessionController, title, status string, maxSteps int, awaitGoal, autoStart bool, startup StartupInfo) AgentModel {
 	sp := spinner.New()
+	// Dot is braille. Legacy conhost has no braille glyphs, so the thinking
+	// marker paints as a box and shifts the following word.
 	sp.Spinner = spinner.Dot
+	if ui.LegacyConsole() {
+		sp.Spinner = spinner.Line
+	}
 	sp.Style = lipgloss.NewStyle().Foreground(colorAccent)
 
 	ti := textinput.New()
-	ti.Placeholder = "task, Enter to start..."
+	ti.Placeholder = "描述安全任务，Enter 开始..."
 	ti.Prompt = ""
 	ti.CharLimit = 256 * 1024
 	ti.Width = 70
@@ -306,7 +321,7 @@ func NewAgentModel(ctrl *SessionController, title, status string, maxSteps int, 
 func (m AgentModel) Init() tea.Cmd {
 	// Explicitly restore paste framing even if a previous child process left
 	// the terminal mode altered.
-	cmds := []tea.Cmd{m.spinner.Tick, tea.EnableBracketedPaste}
+	cmds := []tea.Cmd{m.spinner.Tick, tea.EnableBracketedPaste, m.schedulePollCmd(0)}
 	m.scheduleInputCursorAnchor()
 	if m.autoStart && m.ctrl != nil && m.ctrl.beginRun() {
 		cmds = append(cmds, agentStartCmd(false))
@@ -322,8 +337,8 @@ func isSelectAllKey(msg tea.KeyMsg) bool {
 	if msg.Type == tea.KeyCtrlA {
 		return true
 	}
-	switch msg.String() {
-	case "ctrl+a", "cmd+a", "meta+a":
+	switch strings.ToLower(msg.String()) {
+	case "ctrl+a", "cmd+a", "super+a", "meta+a":
 		return true
 	default:
 		return false
@@ -343,6 +358,20 @@ func isSubmitKey(msg tea.KeyMsg) bool {
 }
 
 func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch event := msg.(type) {
+	case tea.KeyMsg:
+		keys, timer := m.mouseInput.filter(event)
+		return m.applyFilteredKeys(keys, timer)
+	case mouseInputTimeout:
+		if uint64(event) != m.mouseInput.generation {
+			return m, nil
+		}
+		keys := m.mouseInput.flush()
+		return m.applyFilteredKeys(keys, nil)
+	case filteredInputKey:
+		msg = tea.KeyMsg(event)
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -492,10 +521,12 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if (!m.inputAllSelected && draftImageBytes(m.draftImages)+msg.attachment.Size > analyzer.MaxImageBatchBytes) || msg.attachment.Size > analyzer.MaxImageBatchBytes {
 			m.appendLine("error", fmt.Sprintf("单条消息图片总大小不能超过 %d MiB", analyzer.MaxImageBatchBytes>>20), "image batch too large")
 		} else {
+			before := m.captureInputUndo()
 			if m.inputAllSelected {
 				m.clearInputDraft()
 			}
 			m.draftImages = append(m.draftImages, msg.attachment)
+			m.commitInputUndo(before)
 			m.appendLine("info", fmt.Sprintf("✓ 已从%s附加图片：%s · %s · %.1f KiB", msg.source, msg.attachment.Name, msg.attachment.MediaType, float64(msg.attachment.Size)/1024), msg.attachment.Path)
 		}
 		m.recalcLayout()
@@ -506,8 +537,12 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case macosCmdVMsg:
-		if !m.inputFocused() || m.pendingConfirm != nil {
+		if m.pendingConfirm != nil || !m.claimClipboardPaste() {
 			return m, nil
+		}
+		if !m.inputFocused() {
+			m.input.Focus()
+			m.recalcLayout()
 		}
 		sessionID := ""
 		if m.ctrl != nil {
@@ -516,6 +551,32 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, pasteClipboardImageOnlyCmd(sessionID)
 
 	case macosCmdVIgnoredMsg:
+		return m, nil
+
+	case macosCmdAMsg:
+		if m.pendingConfirm != nil {
+			return m, nil
+		}
+		if !m.inputFocused() {
+			m.input.Focus()
+		}
+		m.inputAllSelected = m.input.Value() != "" || len(m.draftParts) > 0 || len(m.draftImages) > 0
+		m.recalcLayout()
+		m.refreshViewport()
+		m.scheduleInputCursorAnchor()
+		return m, nil
+
+	case macosCmdZMsg:
+		if m.pendingConfirm != nil {
+			return m, nil
+		}
+		if !m.inputFocused() {
+			m.input.Focus()
+		}
+		if m.undoInput() {
+			m.recalcLayout()
+			m.scheduleInputCursorAnchor()
+		}
 		return m, nil
 
 	case clipboardPasteResultMsg:
@@ -604,6 +665,26 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scheduleInputCursorAnchor()
 		return m, nil
 
+	case scheduleInboxMsg:
+		m.inboxOffset = msg.offset
+		m.inboxPrimed = msg.primed
+		m.scheduleStatus = msg.scheduleStatus
+		if len(msg.lines) > 0 {
+			m.returnToLiveTail()
+			for _, line := range msg.lines {
+				kind := line.Kind
+				if kind != "info" && kind != "result" && kind != "error" {
+					kind = "info"
+				}
+				m.appendLine(kind, line.Text, line.Text)
+			}
+			m.refreshViewport()
+		}
+		if m.quitting {
+			return m, nil
+		}
+		return m, m.schedulePollCmd(2 * time.Second)
+
 	case userMsgEvent:
 		m.returnToLiveTail()
 		m.appendLine("user", "You: "+msg.text, msg.text)
@@ -680,13 +761,6 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		// Ignore complete leaked SGR mouse reports, but preserve literal pasted text.
-		if !msg.Paste && msg.Type == tea.KeyRunes {
-			msg.Runes = []rune(leakedMouseReport.ReplaceAllString(string(msg.Runes), ""))
-			if len(msg.Runes) == 0 {
-				return m, nil
-			}
-		}
 		key := msg.String()
 
 		if m.pendingConfirm != nil {
@@ -838,14 +912,23 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle the raw control-key type before bracketed paste. Some terminal
 		// stacks mark Ctrl+V as an empty paste event; letting that event reach the
 		// generic paste branch silently inserts nothing and makes image paste look
-		// broken. A real Ctrl+V always means "read the OS clipboard" here.
-		if m.inputFocused() && isClipboardPasteShortcut(msg) {
+		// broken. A real Ctrl+V always means "read the OS clipboard" here, even
+		// when the input is not focused yet — users paste screenshots without
+		// pressing Tab first.
+		if m.pendingConfirm == nil && isClipboardPasteShortcut(msg) {
+			if !m.claimClipboardPaste() {
+				return m, nil
+			}
+			if !m.inputFocused() {
+				m.input.Focus()
+			}
 			sessionID := ""
 			if m.ctrl != nil {
 				sessionID = m.ctrl.Stats().SessionID
 			}
 			m.appendLine("info", "正在读取剪贴板（图片优先）…", "clipboard paste")
 			m.refreshViewport()
+			m.scheduleInputCursorAnchor()
 			return m, pasteClipboardCmd(sessionID)
 		}
 
@@ -858,6 +941,9 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sessionID = m.ctrl.Stats().SessionID
 			}
 			if len(msg.Runes) == 0 {
+				if !m.claimClipboardPaste() {
+					return m, nil
+				}
 				m.appendLine("info", "正在读取剪贴板（图片优先）…", "clipboard paste")
 				m.refreshViewport()
 				return m, pasteClipboardCmd(sessionID)
@@ -867,7 +953,9 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport()
 				return m, attachImageCmd(path, sessionID)
 			}
+			before := m.captureInputUndo()
 			m.acceptPaste(string(msg.Runes))
+			m.commitInputUndo(before)
 			m.recalcLayout()
 			m.refreshViewport()
 			m.scheduleInputCursorAnchor()
@@ -876,10 +964,22 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// 输入聚焦：仅处理输入相关快捷键，其余字符交给 textinput（避免 q/e/j/k 等全局键抢输入）
 		if m.inputFocused() {
+			if key == "ctrl+z" || key == "cmd+z" || key == "super+z" {
+				if m.undoInput() {
+					m.recalcLayout()
+					m.scheduleInputCursorAnchor()
+				}
+				return m, nil
+			}
+			before := m.captureInputUndo()
+			finish := func(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+				m.commitInputUndo(before)
+				return m, cmd
+			}
 			if isSelectAllKey(msg) {
 				m.inputAllSelected = m.input.Value() != "" || len(m.draftParts) > 0 || len(m.draftImages) > 0
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			}
 			if m.inputAllSelected {
 				switch key {
@@ -887,7 +987,7 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.clearInputDraft()
 					m.recalcLayout()
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				case "left", "right", "home", "end", "up", "down", "ctrl+b", "ctrl+f", "ctrl+e", "tab":
 					m.inputAllSelected = false
 				default:
@@ -898,37 +998,37 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if isSubmitKey(msg) && m.pendingAsk != nil {
 				if cmd := m.submitAskResponse(); cmd != nil {
-					return m, cmd
+					return finish(cmd)
 				}
-				return m, nil
+				return finish(nil)
 			}
 			if isSubmitKey(msg) && m.running && m.pendingConfirm == nil {
 				if cmd := m.tryInterruptSubmit(); cmd != nil {
-					return m, cmd
+					return finish(cmd)
 				}
-				return m, nil
+				return finish(nil)
 			}
 			if isSubmitKey(msg) && !m.running && m.pendingConfirm == nil {
 				if cmd := m.trySubmit(); cmd != nil {
-					return m, cmd
+					return finish(cmd)
 				}
-				return m, nil
+				return finish(nil)
 			}
 			switch key {
 			case "alt+enter", "shift+enter", "ctrl+j":
 				m.appendInputNewline()
 				m.recalcLayout()
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "ctrl+l":
 				m.clearView()
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "ctrl+u":
 				m.clearInputDraft()
 				m.recalcLayout()
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "backspace", "delete":
 				if (len(m.draftParts) > 0 || len(m.draftImages) > 0) && m.input.Value() == "" {
 					if key == "backspace" {
@@ -936,46 +1036,46 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.recalcLayout()
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				}
 			case "up":
 				if m.hasSlashSuggestions() {
 					m.moveSlashSelection(-1)
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				}
 				if m.moveInputCursorLine(-1) {
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				}
 				m.recallInputHistory(-1)
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "down":
 				if m.hasSlashSuggestions() {
 					m.moveSlashSelection(1)
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				}
 				if m.moveInputCursorLine(1) {
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				}
 				m.recallInputHistory(1)
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "tab":
 				if m.acceptSlashSuggestion() {
 					m.recalcLayout()
 					m.scheduleInputCursorAnchor()
-					return m, nil
+					return finish(nil)
 				}
 			case "pgup":
 				m.autoScroll = false
 				m.viewport.ViewUp()
 				m.invalidateFooter()
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "pgdown":
 				m.viewport.ViewDown()
 				if m.viewport.AtBottom() {
@@ -983,24 +1083,24 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.invalidateFooter()
 				m.scheduleInputCursorAnchor()
-				return m, nil
+				return finish(nil)
 			case "ctrl+home":
 				m.autoScroll = false
 				m.viewport.GotoTop()
 				m.invalidateFooter()
-				return m, nil
+				return finish(nil)
 			case "ctrl+end":
 				m.autoScroll = true
 				m.viewport.GotoBottom()
 				m.invalidateFooter()
-				return m, nil
+				return finish(nil)
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			m.clampSlashSelection()
 			m.recalcLayout()
 			m.scheduleInputCursorAnchor()
-			return m, cmd
+			return finish(cmd)
 		}
 
 		// 提交：Enter（必须用 tea.Cmd 更新状态，禁止 program.Send 防死锁）
@@ -1025,6 +1125,8 @@ func (m AgentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// 以下全局快捷键仅在输入未聚焦时生效
 		switch key {
+		case "ctrl+z":
+			return m, nil
 		case "ctrl+l":
 			m.clearView()
 			return m, nil
@@ -1114,6 +1216,7 @@ func (m *AgentModel) submitAskResponse() tea.Cmd {
 	}
 	ch := m.pendingAsk.respCh
 	m.pendingAsk = nil
+	m.dropInputUndo = true
 	m.clearInputDraft()
 	m.input.Blur()
 	cancelInputCursorAnchor()
@@ -1144,6 +1247,7 @@ func (m *AgentModel) tryInterruptSubmit() tea.Cmd {
 	if runewidth.StringWidth(text) <= 4000 {
 		m.inputHistory = append(m.inputHistory, text)
 	}
+	m.dropInputUndo = true
 	m.clearInputDraft()
 	m.input.Blur()
 	cancelInputCursorAnchor()
@@ -1309,6 +1413,7 @@ func (m *AgentModel) trySubmit() tea.Cmd {
 		m.inputHistory = append(m.inputHistory, text)
 	}
 	m.historyIdx = -1
+	m.dropInputUndo = true
 
 	followUp := !m.awaitGoal && (m.sessionLive || m.done)
 	firstTurn := m.awaitGoal || (!m.sessionLive && !m.done && !followUp)
@@ -1407,6 +1512,7 @@ func (m *AgentModel) recallInputHistory(delta int) {
 }
 
 func (m *AgentModel) handleSlashCommand(text string) tea.Cmd {
+	m.dropInputUndo = true
 	cmd, arg := splitSlashCommand(text)
 	if cmd == "image" {
 		m.draftParts = nil
@@ -1523,6 +1629,8 @@ func (m *AgentModel) handleSlashCommand(text string) tea.Cmd {
 		result := m.handleSkillSlash(arg)
 		m.refreshViewport()
 		return result
+	case cmd == "schedule" || cmd == "schedules" || cmd == "task":
+		m.handleScheduleSlash(arg)
 	case cmd == "exit" || cmd == "quit":
 		m.quitting = true
 		cancelInputCursorAnchor()
@@ -1702,6 +1810,8 @@ func (m *AgentModel) resumeSessionSlash(arg string) tea.Cmd {
 	m.lines = []logLine{}
 	m.lineID = 0
 	m.streamIdx = -1
+	m.streamRaw = nil
+	m.streamDirty = false
 	m.streamTick = false
 	m.cmdOutputGroup = 0
 	m.activeCmdGroup = 0
@@ -1727,6 +1837,7 @@ func (m *AgentModel) resumeSessionSlash(arg string) tea.Cmd {
 	m.bannerCache = ""
 	m.bannerCacheW = 0
 	m.clearInputDraft()
+	m.resetInputUndo()
 	cancelInputCursorAnchor()
 
 	m.input.Blur()
@@ -2205,7 +2316,7 @@ func (m *AgentModel) handleSkillSlash(arg string) tea.Cmd {
 		case "audit", "check":
 			return skillMarketCmd("audit", map[string]string{"action": "audit"})
 		case "add":
-			source := strings.TrimSpace(strings.TrimPrefix(arg, "add"))
+			source := strings.TrimSpace(strings.Join(fields[1:], " "))
 			if source == "" {
 				m.appendLine("error", "用法: /skill add /path/to/skills", arg)
 				return nil
@@ -2213,7 +2324,7 @@ func (m *AgentModel) handleSkillSlash(arg string) tea.Cmd {
 			args = map[string]string{"action": "add_skill_source", "source": source}
 			action = "add"
 		case "source-off", "off-source":
-			source := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+			source := strings.TrimSpace(strings.Join(fields[1:], " "))
 			if source == "" {
 				m.appendLine("error", "用法: /skill source-off /path/to/skills", arg)
 				return nil
@@ -2221,7 +2332,7 @@ func (m *AgentModel) handleSkillSlash(arg string) tea.Cmd {
 			args = map[string]string{"action": "disable_skill_source", "source": source}
 			action = "source-off"
 		case "source-on", "on-source":
-			source := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+			source := strings.TrimSpace(strings.Join(fields[1:], " "))
 			if source == "" {
 				m.appendLine("error", "用法: /skill source-on /path/to/skills", arg)
 				return nil
@@ -2229,7 +2340,7 @@ func (m *AgentModel) handleSkillSlash(arg string) tea.Cmd {
 			args = map[string]string{"action": "enable_skill_source", "source": source}
 			action = "source-on"
 		case "remove", "rm":
-			source := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+			source := strings.TrimSpace(strings.Join(fields[1:], " "))
 			if source == "" {
 				m.appendLine("error", "用法: /skill remove /path/to/skills", arg)
 				return nil
@@ -2274,9 +2385,9 @@ func splitSkillCommandFields(input string) ([]string, error) {
 	runes := []rune(input)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
-		if r == '\\' && i+1 < len(runes) {
+		if quote == 0 && r == '\\' && i+1 < len(runes) {
 			next := runes[i+1]
-			if next == '\\' || next == '\'' || next == '"' || unicode.IsSpace(next) {
+			if next == '\'' || next == '"' || unicode.IsSpace(next) {
 				current.WriteRune(next)
 				i++
 				continue
@@ -2510,6 +2621,8 @@ func (m *AgentModel) startNewSession(goal string) tea.Cmd {
 	m.lines = []logLine{}
 	m.lineID = 0
 	m.streamIdx = -1
+	m.streamRaw = nil
+	m.streamDirty = false
 	m.streamTick = false
 	m.cmdOutputGroup = 0
 	m.activeCmdGroup = 0
@@ -2535,6 +2648,7 @@ func (m *AgentModel) startNewSession(goal string) tea.Cmd {
 	m.bannerCache = ""
 	m.bannerCacheW = 0
 	m.clearInputDraft()
+	m.resetInputUndo()
 	cancelInputCursorAnchor()
 
 	if hasGoal {
@@ -2561,6 +2675,8 @@ func (m *AgentModel) clearView() {
 	m.lines = []logLine{}
 	m.lineID = 0
 	m.streamIdx = -1
+	m.streamRaw = nil
+	m.streamDirty = false
 	m.cmdOutputGroup = 0
 	m.activeCmdGroup = 0
 	m.trimmedLines = 0
@@ -2775,6 +2891,93 @@ func (m *AgentModel) moveInputCursorLine(delta int) bool {
 		return false
 	}
 	m.input.SetCursor(best)
+	return true
+}
+
+// claimClipboardPaste lets exactly one paste trigger win per keystroke. The
+// console can deliver Ctrl+V as a key while the OS key watcher also reports
+// it, and both paths would otherwise attach the same clipboard image twice.
+func (m *AgentModel) claimClipboardPaste() bool {
+	now := time.Now()
+	if !m.lastClipPaste.IsZero() && now.Sub(m.lastClipPaste) < 600*time.Millisecond {
+		return false
+	}
+	m.lastClipPaste = now
+	return true
+}
+
+type inputUndoSnap struct {
+	value    string
+	cursor   int
+	selected bool
+	history  int
+	parts    []inputDraftPart
+	images   []analyzer.ImageAttachment
+}
+
+func (m *AgentModel) captureInputUndo() inputUndoSnap {
+	return inputUndoSnap{
+		value:    m.input.Value(),
+		cursor:   m.input.Position(),
+		selected: m.inputAllSelected,
+		history:  m.historyIdx,
+		parts:    append([]inputDraftPart(nil), m.draftParts...),
+		images:   append([]analyzer.ImageAttachment(nil), m.draftImages...),
+	}
+}
+
+func inputUndoSame(a, b inputUndoSnap) bool {
+	if a.value != b.value || a.selected != b.selected || a.history != b.history || len(a.parts) != len(b.parts) || len(a.images) != len(b.images) {
+		return false
+	}
+	for i := range a.parts {
+		if a.parts[i] != b.parts[i] {
+			return false
+		}
+	}
+	for i := range a.images {
+		if a.images[i].Path != b.images[i].Path || a.images[i].Name != b.images[i].Name || a.images[i].Size != b.images[i].Size {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *AgentModel) commitInputUndo(before inputUndoSnap) {
+	if m.dropInputUndo {
+		m.inputUndo = nil
+		m.dropInputUndo = false
+		return
+	}
+	after := m.captureInputUndo()
+	if inputUndoSame(before, after) {
+		return
+	}
+	const maxInputUndo = 100
+	m.inputUndo = append(m.inputUndo, before)
+	if len(m.inputUndo) > maxInputUndo {
+		m.inputUndo = m.inputUndo[len(m.inputUndo)-maxInputUndo:]
+	}
+}
+
+func (m *AgentModel) resetInputUndo() {
+	m.inputUndo = nil
+	m.dropInputUndo = false
+}
+
+func (m *AgentModel) undoInput() bool {
+	if len(m.inputUndo) == 0 {
+		return false
+	}
+	snap := m.inputUndo[len(m.inputUndo)-1]
+	m.inputUndo = m.inputUndo[:len(m.inputUndo)-1]
+	m.inputAllSelected = snap.selected
+	m.historyIdx = snap.history
+	m.draftParts = append([]inputDraftPart(nil), snap.parts...)
+	m.draftImages = append([]analyzer.ImageAttachment(nil), snap.images...)
+	m.input.SetValue(snap.value)
+	m.input.SetCursor(snap.cursor)
+	m.slashSelected = 0
 	return true
 }
 
@@ -3009,7 +3212,10 @@ func (m *AgentModel) applyEvent(e harness.UIEvent) {
 		m.appendLine("step", fmt.Sprintf("Step %d / %d", e.Step, e.MaxSteps), e.Message)
 	case harness.EventThinking:
 		m.thinking = true
+		m.materializeStream()
 		m.streamIdx = -1
+		m.streamRaw = nil
+		m.streamDirty = false
 	case harness.EventStreamDelta:
 		m.thinking = false
 		m.appendStreamDelta(e.Message)
@@ -3168,13 +3374,22 @@ func (m *AgentModel) appendStreamDelta(delta string) {
 	}
 	if m.streamIdx < 0 || m.streamIdx >= len(m.lines) {
 		m.lineID++
-		m.lines = append(m.lines, logLine{kind: "stream", content: streamDisplay(delta, false), raw: delta, step: m.currentStep, id: m.lineID, at: time.Now()})
+		m.lines = append(m.lines, logLine{kind: "stream", content: "AI 正在思考...", step: m.currentStep, id: m.lineID, at: time.Now()})
 		m.streamIdx = len(m.lines) - 1
-	} else {
-		ln := &m.lines[m.streamIdx]
-		ln.raw += delta
-		ln.content = streamDisplay(ln.raw, false)
+		m.streamRaw = m.streamRaw[:0]
 	}
+	m.streamRaw = append(m.streamRaw, delta...)
+	m.streamDirty = true
+}
+
+func (m *AgentModel) materializeStream() {
+	if !m.streamDirty || m.streamIdx < 0 || m.streamIdx >= len(m.lines) {
+		return
+	}
+	ln := &m.lines[m.streamIdx]
+	ln.raw = string(m.streamRaw)
+	ln.content = streamDisplay(ln.raw, false)
+	m.streamDirty = false
 }
 
 func (m *AgentModel) finalizeStream(full string) {
@@ -3182,11 +3397,20 @@ func (m *AgentModel) finalizeStream(full string) {
 		ln := &m.lines[m.streamIdx]
 		if strings.TrimSpace(full) != "" {
 			ln.raw = full
+		} else if m.streamDirty {
+			ln.raw = string(m.streamRaw)
 		}
 		ln.content = streamDisplay(ln.raw, true)
 		ln.complete = true
+	} else if strings.TrimSpace(full) != "" {
+		// Every preview delta may have been dropped under UI backpressure.
+		// The semantic end event still restores the complete stream line.
+		m.lineID++
+		m.lines = append(m.lines, logLine{kind: "stream", content: streamDisplay(full, true), raw: full, step: m.currentStep, id: m.lineID, at: time.Now(), complete: true})
 	}
 	m.streamIdx = -1
+	m.streamRaw = nil
+	m.streamDirty = false
 }
 
 func (m *AgentModel) collapseStreamLine(id int) {
@@ -3450,6 +3674,8 @@ func (m *AgentModel) removeLogLine(index int) {
 	switch {
 	case m.streamIdx == index:
 		m.streamIdx = -1
+		m.streamRaw = nil
+		m.streamDirty = false
 	case m.streamIdx > index:
 		m.streamIdx--
 	}
@@ -3614,6 +3840,7 @@ func renderAskPrompt(prompt string, options []string) string {
 }
 
 func (m *AgentModel) refreshViewport() {
+	m.materializeStream()
 	// Bubble Tea normally repaints only rows whose strings changed. Complex
 	// wide glyphs, styled borders and fast viewport/footer movement can leave a
 	// terminal's physical rows out of sync with that cache. A private marker on
@@ -3746,7 +3973,7 @@ func (m AgentModel) renderHeader(w int) string {
 	contentW := max(1, w-styleHeader.GetHorizontalFrameSize())
 	left := sanitizeTUIText(fmt.Sprintf("DeepSentry Agent  │  %s", m.title))
 	if contentW < 48 {
-		return styleHeader.Width(w).Render(runewidth.Truncate(left, contentW, "…"))
+		return styleHeader.Width(w).Render(truncateDisplay(left, contentW, "…"))
 	}
 	rightMax := max(18, contentW/2)
 	if contentW >= 100 {
@@ -3754,14 +3981,14 @@ func (m AgentModel) renderHeader(w int) string {
 	}
 	right := sanitizeTUIText(m.headerStatsText(rightMax))
 	if right == "" {
-		return styleHeader.Width(w).Render(runewidth.Truncate(left, contentW, "…"))
+		return styleHeader.Width(w).Render(truncateDisplay(left, contentW, "…"))
 	}
 
-	right = runewidth.Truncate(right, rightMax, "…")
-	leftW := contentW - lipgloss.Width(right) - 1
+	right = truncateDisplay(right, rightMax, "…")
+	leftW := contentW - displayWidth(right) - 1
 	leftW = max(1, leftW)
-	left = runewidth.Truncate(left, leftW, "…")
-	gap := contentW - lipgloss.Width(left) - lipgloss.Width(right)
+	left = truncateDisplay(left, leftW, "…")
+	gap := contentW - displayWidth(left) - displayWidth(right)
 	if gap < 1 {
 		gap = 1
 	}
@@ -3924,7 +4151,7 @@ func (m AgentModel) View() string {
 
 	header := m.renderHeader(renderW)
 	stepInfo := ""
-	if m.currentStep > 0 {
+	if m.running && m.currentStep > 0 {
 		stepInfo = fmt.Sprintf("Step %d/%d", m.currentStep, m.maxSteps)
 	}
 	var help string
@@ -3939,6 +4166,9 @@ func (m AgentModel) View() string {
 	}
 	statusW := max(1, renderW-styleStatusBar.GetHorizontalFrameSize())
 	statusParts := []string{m.statusLine, m.statusContextText()}
+	if sched := strings.TrimSpace(m.scheduleStatus); sched != "" {
+		statusParts = append(statusParts, sched)
+	}
 	if stepInfo != "" {
 		statusParts = append(statusParts, stepInfo)
 	}
@@ -3998,7 +4228,7 @@ func (m AgentModel) View() string {
 		renderedBlockHeight(suggestions),
 		lipgloss.Height(status),
 	)
-	return m.withCursorFrameMarker(view)
+	return m.withCursorFrameMarker(paintFrameBackground(view))
 }
 
 func (m *AgentModel) invalidateFooter() {
@@ -4114,10 +4344,15 @@ func (m AgentModel) footerHelpText() string {
 		return "输入补充内容或选项编号 · Enter 继续 · PgUp 翻阅 · Ctrl+Home 顶部 · Ctrl+End 底部"
 	}
 	if m.inputFocused() {
-		if m.running {
-			return "Esc 中断 · Enter 发送 · Shift+Enter 换行 · Ctrl+A 全选 · " + pasteShortcutHelp() + " · ↑↓ 历史 · Ctrl+U 清空 · Tab 浏览"
+		// The hint stays under the box. Painting it inside the focused row
+		// puts it on the same cells the IME uses for uncommitted pinyin.
+		if m.focusedInputIsEmpty() {
+			return strings.TrimSpace(strings.TrimPrefix(m.inputHintText(), ">"))
 		}
-		return "Enter 发送 · Shift+Enter 换行 · Ctrl+A 全选 · " + pasteShortcutHelp() + " · ↑↓ 历史 · PgUp 翻阅 · Ctrl+Home/End 顶/底 · /help"
+		if m.running {
+			return "Esc 中断 · Enter 发送 · Shift+Enter 换行 · " + editShortcutHelp() + " · " + pasteShortcutHelp() + " · ↑↓ 历史 · Ctrl+U 清空 · Tab 浏览"
+		}
+		return "Enter 发送 · Shift+Enter 换行 · " + editShortcutHelp() + " · " + pasteShortcutHelp() + " · ↑↓ 历史 · PgUp 翻阅 · Ctrl+Home/End 顶/底 · /help"
 	}
 	if m.running {
 		return "Tab 输入新指令并 Enter 可中途打断 · Esc 停止 · ↑↓/jk 滚动 · g/Home 顶部 · G 底部 · e 全展/全折 · Y/N 确认"
@@ -4138,17 +4373,11 @@ func (m AgentModel) inputHintText() string {
 	return "> Enter 发送..."
 }
 
-func (m AgentModel) inputPlaceholderText() string {
-	if m.awaitGoal {
-		return "> task, Enter to start..."
+func (m AgentModel) focusedInputIsEmpty() bool {
+	if strings.TrimSpace(decodeInputValue(m.input.Value())) != "" {
+		return false
 	}
-	if m.pendingAsk != nil {
-		return "> answer, Enter to continue..."
-	}
-	if m.sessionLive || m.done {
-		return "> follow up, Enter to send..."
-	}
-	return "> Enter to send..."
+	return m.draftDisplayPrefix() == ""
 }
 
 func (m AgentModel) renderInputLine() string {
@@ -4160,7 +4389,7 @@ func (m AgentModel) renderInputLine() string {
 	innerW := w - 2
 
 	m.input.Width = innerW
-	m.input.Placeholder = m.inputPlaceholderText()
+	m.input.Placeholder = ""
 
 	var rows []string
 	switch {
@@ -4271,11 +4500,10 @@ func (m AgentModel) focusedInputRows(width int) ([]string, int, int) {
 		value = prefix + value
 		inputPos += len([]rune(prefix))
 	}
-	placeholder := false
-	if value == "" {
-		value = m.inputPlaceholderText()
-		placeholder = true
-	}
+	// Leave an empty focused row as a single cursor cell. Chinese IMEs draw
+	// uncommitted pinyin at that hardware cursor; the hint used to occupy the
+	// same cells, so the composition and "追问上一题..." appeared together
+	// until the candidate was committed.
 	pos := inputPos
 	runes := []rune(value)
 	if pos < 0 {
@@ -4286,11 +4514,8 @@ func (m AgentModel) focusedInputRows(width int) ([]string, int, int) {
 	}
 
 	textStyle := styleInputLine
-	if m.inputAllSelected && !placeholder {
+	if m.inputAllSelected && value != "" {
 		textStyle = styleSelection
-	}
-	if placeholder {
-		textStyle = styleInfo.Background(colorSurface)
 	}
 
 	type unit struct {

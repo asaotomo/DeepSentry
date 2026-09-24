@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"ai-edr/internal/harness/subagent"
 	"ai-edr/internal/mcp"
 	deepsentrytools "ai-edr/internal/tools"
 	"encoding/json"
@@ -60,7 +61,7 @@ func agentToolDefinitionsForContext(limit int, contextText string, pinned []stri
 							"enum":        []string{"execute", "task", "load_skill", "todo", "ask_user", "read_file", "write_file", "edit_file", "glob", "grep", "ls", "remember", "forget", "tool", "finish"},
 						},
 						"command":        map[string]string{"type": "string", "description": "Native shell command to run. This is the default path for system status, logs, scripts, chmod, crontab/systemd, curl notifications, etc."},
-						"task_name":      map[string]string{"type": "string", "description": "Required when action=task and parallel_tasks is not used. Must be one of: log-analyst, vuln-scanner, webshell-hunter, network-analyst, general-purpose, ctf-solver, awd-defender, awd-plus-operator. Never leave empty."},
+						"task_name":      map[string]string{"type": "string", "description": "Required when action=task and parallel_tasks is not used. Must be one of: " + strings.Join(subagent.Names(), ", ") + ". Never leave empty."},
 						"task_prompt":    map[string]string{"type": "string", "description": "Required when action=task and parallel_tasks is not used. Give the sub-agent a concrete standalone task. Never leave empty."},
 						"task_max_steps": map[string]string{"type": "integer", "description": "AI-estimated max steps for this sub-agent task. The runtime caps it by user-configured subagent_max_steps."},
 						"parallel_tasks": map[string]interface{}{
@@ -85,9 +86,11 @@ func agentToolDefinitionsForContext(limit int, contextText string, pinned []stri
 						"path":            map[string]string{"type": "string"},
 						"content":         map[string]string{"type": "string"},
 						"pattern":         map[string]string{"type": "string"},
-						"old_string":      map[string]string{"type": "string"},
-						"new_string":      map[string]string{"type": "string"},
-						"replace_all":     map[string]string{"type": "boolean"},
+						"old_string":      map[string]string{"type": "string", "description": "edit_file 要替换的原文。必须包含足够上下文，使匹配唯一；多处相同且都要改时才配合 replace_all。"},
+						"new_string":      map[string]string{"type": "string", "description": "edit_file 的替换结果。"},
+						"replace_all":     map[string]string{"type": "boolean", "description": "仅当 old_string 的每一处都应替换时设为 true。默认拒绝非唯一匹配。"},
+						"offset":          map[string]string{"type": "integer", "description": "read_file 起始行，从 1 开始。大文件返回 next offset，不要整文件重读。"},
+						"limit":           map[string]string{"type": "integer", "description": "read_file 最多读取的行数，最大 400。"},
 						"glob_pattern":    map[string]string{"type": "string"},
 						"memory_key":      map[string]string{"type": "string"},
 						"memory_value":    map[string]string{"type": "string"},
@@ -163,6 +166,7 @@ func agentToolDefinitionsForContext(limit int, contextText string, pinned []stri
 		if aliases := deepsentrytools.SearchAliases(name); len(aliases) > 0 {
 			description += "\nTypical intents / 常见意图: " + strings.Join(aliases, ", ")
 		}
+		description = truncateToolDescription(description, 1020)
 		definitions = append(definitions, ToolDefinition{
 			Type: "function",
 			Function: FunctionDef{
@@ -473,6 +477,7 @@ func selectNativeToolNamesWithPinned(names []string, limit int, contextText stri
 		return names
 	}
 	query := strings.ToLower(contextText)
+	searchQuery := deepsentrytools.NewSearchQuery(query)
 	selected := make([]string, 0, limit)
 	seen := map[string]bool{}
 	// Previously selected tools have the strongest claim on the bounded native
@@ -504,7 +509,7 @@ func selectNativeToolNamesWithPinned(names []string, limit int, contextText stri
 		if !ok {
 			continue
 		}
-		score := deepsentrytools.SearchRelevance(tool, query)
+		score := deepsentrytools.SearchRelevanceForQuery(tool, searchQuery)
 		scored = append(scored, scoredTool{name: name, score: score})
 	}
 	sort.Slice(scored, func(i, j int) bool {
@@ -563,12 +568,12 @@ func truncateToolDescription(text string, maxRunes int) string {
 // ParseToolCallResponse 从 native tool_calls 解析 AgentResponse
 func ParseToolCallResponse(toolCallArgs string) (AgentResponse, error) {
 	var compat CompatibilityResponse
-	if err := json.Unmarshal([]byte(toolCallArgs), &compat); err != nil {
+	if err := json.Unmarshal([]byte(repairModelJSONEscapes(toolCallArgs)), &compat); err != nil {
 		return AgentResponse{}, err
 	}
 	resp := AgentResponse{
 		Thought:        compat.Thought,
-		Command:        decodeJSONUnicodeEscapes(compat.Command),
+		Command:        compat.Command,
 		RiskLevel:      compat.RiskLevel,
 		IsFinished:     compat.IsFinished,
 		Question:       compat.Question,
@@ -596,6 +601,8 @@ func ParseToolCallResponse(toolCallArgs string) (AgentResponse, error) {
 		NewString:      compat.NewString,
 		ReplaceAll:     compat.ReplaceAll,
 		GlobPattern:    compat.GlobPattern,
+		Offset:         compat.Offset,
+		Limit:          compat.Limit,
 	}
 	if v, ok := compat.FinalReport.(string); ok {
 		resp.FinalReport = v
@@ -612,7 +619,7 @@ func ParseNamedToolCall(name, toolCallArgs string) (AgentResponse, error) {
 		return ParseToolCallResponse(toolCallArgs)
 	}
 	var raw map[string]interface{}
-	if err := json.Unmarshal([]byte(toolCallArgs), &raw); err != nil {
+	if err := json.Unmarshal([]byte(repairModelJSONEscapes(toolCallArgs)), &raw); err != nil {
 		return AgentResponse{}, err
 	}
 	if name == "skill" || name == "load_skill" {

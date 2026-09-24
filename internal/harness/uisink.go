@@ -30,10 +30,12 @@ const (
 	EventSubAgentResult EventKind = "subagent_result"
 	EventTargetStatus   EventKind = "target_status"
 	EventCommandOutput  EventKind = "command_output"
-	EventStreamDelta    EventKind = "stream_delta"
-	EventStreamEnd      EventKind = "stream_end"
-	EventAwaitUser      EventKind = "await_user"
-	EventTokenUsage     EventKind = "token_usage"
+	// Stream deltas carry only the new bytes in Message. StreamEnd carries the
+	// complete response in Detail, including chunks a UI may have dropped.
+	EventStreamDelta EventKind = "stream_delta"
+	EventStreamEnd   EventKind = "stream_end"
+	EventAwaitUser   EventKind = "await_user"
+	EventTokenUsage  EventKind = "token_usage"
 )
 
 // UIEvent 单条 UI 事件

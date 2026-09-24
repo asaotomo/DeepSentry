@@ -25,17 +25,17 @@ func TestHeadlessLoginEvidenceIntegration(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/login" && r.Method == "POST" {
 			if r.FormValue("user") != "test-user" || r.FormValue("password") != "test-password" {
-				http.Error(w, "bad login", 403)
+				http.Error(w, "bad login", http.StatusForbidden)
 				return
 			}
 			http.SetCookie(w, &http.Cookie{Name: "session", Value: "test-session", HttpOnly: true, Path: "/"})
-			http.Redirect(w, r, "/dashboard", 303)
+			http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 			return
 		}
 		if r.URL.Path == "/dashboard" {
 			cookie, e := r.Cookie("session")
 			if e != nil || cookie.Value != "test-session" {
-				http.Redirect(w, r, "/", 302)
+				http.Redirect(w, r, "/", http.StatusFound)
 				return
 			}
 			fmt.Fprint(w, `<html><body><nav id="ready">Fixture device</nav><section id="cpu" style="background:white;color:black;width:500px;height:150px;font:24px sans-serif">CPU: 12<br>Alarm count: 0</section></body></html>`)

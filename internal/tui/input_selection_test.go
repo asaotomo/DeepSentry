@@ -78,3 +78,80 @@ func TestInputLeakedMouseReportIsNotTyped(t *testing.T) {
 		t.Fatal("literal pasted text was modified")
 	}
 }
+
+func TestCtrlZUndoesInputEdits(t *testing.T) {
+	m := selectionModel()
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("大三")})
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("大四")})
+	if m.currentInputValue() != "大三大四" {
+		t.Fatalf("typed %q", m.currentInputValue())
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if m.currentInputValue() != "大三" {
+		t.Fatalf("undo last edit: %q", m.currentInputValue())
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	if m.currentInputValue() != "" {
+		t.Fatal("ctrl+u did not clear")
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if m.currentInputValue() != "大三" {
+		t.Fatalf("undo clear: %q", m.currentInputValue())
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("尾部"), Paste: true})
+	if m.currentInputValue() != "大三尾部" {
+		t.Fatalf("paste: %q", m.currentInputValue())
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if m.currentInputValue() != "大三" {
+		t.Fatalf("undo paste: %q", m.currentInputValue())
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlZ})
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if m.currentInputValue() != "" {
+		t.Fatalf("undo to empty: %q", m.currentInputValue())
+	}
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if m.currentInputValue() != "" {
+		t.Fatal("extra ctrl+z changed empty input")
+	}
+}
+
+func TestMacEditChordStaysInsideInput(t *testing.T) {
+	msg, ok := macEditChordToSwallow(cgEventFlagCommand, 0x00)
+	if !ok {
+		t.Fatal("command+a should be handled by the input")
+	}
+	if _, isSelect := msg.(macosCmdAMsg); !isSelect {
+		t.Fatalf("command+a message: %#v", msg)
+	}
+	msg, ok = macEditChordToSwallow(cgEventFlagCommand, 0x06)
+	if _, isUndo := msg.(macosCmdZMsg); !ok || !isUndo {
+		t.Fatalf("command+z message: %#v %v", msg, ok)
+	}
+	if _, ok := macEditChordToSwallow(cgEventFlagCommand, 0x09); ok {
+		t.Fatal("command+v must stay with the terminal paste path")
+	}
+	if _, ok := macEditChordToSwallow(cgEventFlagCommand|cgEventFlagShift, 0x00); ok {
+		t.Fatal("shifted command+a is not input select-all")
+	}
+}
+
+func TestMacCommandSelectAllAndUndo(t *testing.T) {
+	m := selectionModel()
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("大三")})
+	m = inputKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("大四")})
+	next, _ := m.Update(macosCmdAMsg{})
+	m = next.(AgentModel)
+	if !m.inputAllSelected || m.currentInputValue() != "大三大四" {
+		t.Fatalf("command+a select-all: selected=%v value=%q", m.inputAllSelected, m.currentInputValue())
+	}
+	next, _ = m.Update(macosCmdZMsg{})
+	m = next.(AgentModel)
+	if m.currentInputValue() != "大三" {
+		t.Fatalf("command+z undo: %q", m.currentInputValue())
+	}
+	if !isSelectAllKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}) && !isSelectAllKey(tea.KeyMsg{Type: tea.KeyCtrlA}) {
+		t.Fatal("ctrl+a should still select all")
+	}
+}

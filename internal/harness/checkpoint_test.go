@@ -212,6 +212,57 @@ func TestCheckpointIntegrityFallsBackToPreviousSnapshot(t *testing.T) {
 	}
 }
 
+func TestCheckpointIntegrityRejectsUnknownFieldTampering(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := NewCheckpointStore("session_unknown_field")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(CheckpointData{StepNum: 1, State: NewAgentState("")}); err != nil {
+		t.Fatal(err)
+	}
+	path := store.SessionDir() + "/checkpoint.json"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatal(err)
+	}
+	object["unexpected_action_state"] = json.RawMessage(`{"completed":true}`)
+	tampered, err := json.MarshalIndent(object, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCheckpoint("session_unknown_field"); err == nil || !strings.Contains(err.Error(), "完整性") {
+		t.Fatalf("unknown-field tampering passed integrity check: %v", err)
+	}
+}
+
+func TestCheckpointV3IntegrityAndToolSafePointStillLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := NewCheckpointStore("session_v3_compat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := NewAgentState("")
+	state.BeginToolCall(ToolCallRecord{ID: "pending_v3", Name: "config_manage", Risk: "high"})
+	if err := store.Save(CheckpointData{SchemaVersion: 3, State: state}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadCheckpoint("session_v3_compat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.State.ToolCallPending("pending_v3"); !ok {
+		t.Fatal("v3 safe point was lost during compatibility load")
+	}
+}
+
 func TestCheckpointPersistsToolCallSafePoint(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store, err := NewCheckpointStore("session_tool_calls")

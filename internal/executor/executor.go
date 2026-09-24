@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,13 +97,22 @@ func (w *streamingOutputWriter) consume(p []byte, flush bool) {
 func normalizeLocalOutputLine(raw []byte) string {
 	line := string(raw)
 	if runtime.GOOS == "windows" {
-		if utf8Out, err := GbkToUtf8(raw); err == nil {
-			line = string(utf8Out)
-		}
+		line = decodeWindowsOutput(raw)
 	}
 	line = strings.ReplaceAll(line, "Active code page: 65001\r\n", "")
 	line = strings.ReplaceAll(line, "Active code page: 65001\n", "")
 	return line
+}
+
+// Modern Windows tools often emit UTF-8 even when legacy cmd tools use GBK.
+func decodeWindowsOutput(raw []byte) string {
+	if utf8.Valid(raw) {
+		return string(raw)
+	}
+	if decoded, err := GbkToUtf8(raw); err == nil {
+		return string(decoded)
+	}
+	return string(raw)
 }
 
 func newOutputCollector(maxBytes int) *outputCollector {
@@ -287,10 +295,8 @@ func (l *LocalExecutor) RunWithStreaming(cmdStr string, onLine func(string)) (st
 
 func (l *LocalExecutor) RunWithStreamingAndStop(cmdStr string, onLine func(string), stop <-chan struct{}) (string, error) {
 	// 1. 清洗 local_run 标记
-	if strings.Contains(cmdStr, "local_run ") {
-		cmdStr = strings.ReplaceAll(cmdStr, "local_run ", "")
-	}
 	cmdStr = strings.TrimSpace(cmdStr)
+	cmdStr = strings.TrimPrefix(cmdStr, "local_run ")
 	if CommandUsesSudo(cmdStr) {
 		cmdStr = ForceNonInteractiveSudo(cmdStr)
 	}
@@ -602,15 +608,21 @@ func runLocalShellCommandWithStop(cmdStr string, onLine func(string), stop <-cha
 	defer cancel()
 	var cmd *exec.Cmd
 
-	lowerCmd := strings.ToLower(cmdStr)
-	isPowerShell := strings.HasPrefix(lowerCmd, "powershell") || strings.HasPrefix(lowerCmd, "pwsh")
+	_, _, isPowerShell := splitPowerShellLauncher(cmdStr)
 
 	if runtime.GOOS == "windows" {
 		if isPowerShell {
 			shell, script := parsePowerShellCommand(cmdStr)
-			cmd = exec.CommandContext(ctx, shell, "-NoProfile", "-NonInteractive", "-Command", script)
+			lowerScript := strings.ToLower(script)
+			if strings.HasPrefix(lowerScript, "-encodedcommand ") {
+				cmd = exec.CommandContext(ctx, shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", strings.TrimSpace(script[len("-encodedcommand "):]))
+			} else {
+				cmd = exec.CommandContext(ctx, shell, "-NoProfile", "-NonInteractive", "-Command", script)
+			}
 		} else {
-			cmd = exec.CommandContext(ctx, "cmd", "/c", cmdStr)
+			// /d disables AutoRun. /s strips only the quote pair Go adds around
+			// this argument, so quotes inside the user's command survive.
+			cmd = exec.CommandContext(ctx, "cmd", "/d", "/s", "/c", cmdStr)
 		}
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
@@ -648,24 +660,60 @@ func runLocalShellCommandWithStop(cmdStr string, onLine func(string), stop <-cha
 }
 
 func parsePowerShellCommand(cmdStr string) (string, string) {
-	lowerCmd := strings.ToLower(strings.TrimSpace(cmdStr))
-	shell := "powershell"
-	script := strings.TrimSpace(cmdStr)
-	if strings.HasPrefix(lowerCmd, "powershell") {
-		script = strings.TrimSpace(script[len("powershell"):])
-	} else if strings.HasPrefix(lowerCmd, "pwsh") {
-		shell = "pwsh"
-		script = strings.TrimSpace(script[len("pwsh"):])
+	shell, script, ok := splitPowerShellLauncher(cmdStr)
+	if !ok {
+		return "powershell", strings.TrimSpace(cmdStr)
 	}
+	script = stripPowerShellLauncherFlags(script)
+	return shell, unwrapOneQuotePair(script)
+}
 
-	lowerScript := strings.ToLower(script)
-	if strings.HasPrefix(lowerScript, "-command ") {
-		script = strings.TrimSpace(script[len("-command "):])
-	} else if strings.HasPrefix(lowerScript, "-c ") {
-		script = strings.TrimSpace(script[len("-c "):])
+func splitPowerShellLauncher(cmdStr string) (shell, script string, ok bool) {
+	trimmed := strings.TrimSpace(cmdStr)
+	lower := strings.ToLower(trimmed)
+	for _, candidate := range []struct{ prefix, shell string }{
+		{"powershell.exe", "powershell"}, {"powershell", "powershell"},
+		{"pwsh.exe", "pwsh"}, {"pwsh", "pwsh"},
+	} {
+		if strings.HasPrefix(lower, candidate.prefix) &&
+			(len(lower) == len(candidate.prefix) || lower[len(candidate.prefix)] == ' ' || lower[len(candidate.prefix)] == '\t') {
+			return candidate.shell, strings.TrimSpace(trimmed[len(candidate.prefix):]), true
+		}
 	}
-	script = strings.Trim(script, " \"'")
-	return shell, script
+	return "", "", false
+}
+
+// stripPowerShellLauncherFlags drops flags the executor already supplies and
+// returns only the script after -Command/-c. strings.Trim cannot be used for
+// quotes: its cutset would delete a trailing quote that belongs to the script.
+func stripPowerShellLauncherFlags(script string) string {
+	for {
+		script = strings.TrimSpace(script)
+		lower := strings.ToLower(script)
+		switch {
+		case strings.HasPrefix(lower, "-noprofile"):
+			script = script[len("-noprofile"):]
+		case strings.HasPrefix(lower, "-noninteractive"):
+			script = script[len("-noninteractive"):]
+		case strings.HasPrefix(lower, "-nologo"):
+			script = script[len("-nologo"):]
+		case strings.HasPrefix(lower, "-command "):
+			return strings.TrimSpace(script[len("-command "):])
+		case strings.HasPrefix(lower, "-c "):
+			return strings.TrimSpace(script[len("-c "):])
+		default:
+			return script
+		}
+	}
+}
+
+func unwrapOneQuotePair(script string) string {
+	if len(script) >= 2 {
+		if (script[0] == '"' && script[len(script)-1] == '"') || (script[0] == '\'' && script[len(script)-1] == '\'') {
+			return script[1 : len(script)-1]
+		}
+	}
+	return script
 }
 
 func parseTransferCommand(cmd string) (action, src, dst string, ok bool) {
@@ -687,14 +735,22 @@ func splitShellFields(s string) ([]string, error) {
 	escaped := false
 	have := false
 
-	for _, r := range s {
+	for i, r := range s {
 		switch {
 		case escaped:
 			b.WriteRune(r)
 			have = true
 			escaped = false
 		case r == '\\' && !inSingle:
-			escaped = true
+			// Only escape separators and quotes. Preserve backslashes in
+			// Windows drive paths and UNC paths on every host OS.
+			if inDouble && i+1 < len(s) && s[i+1] == '"' && looksLikeWindowsPath(b.String()) {
+				b.WriteRune(r)
+			} else if i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t' || s[i+1] == '\n' || s[i+1] == '\r' || s[i+1] == '"' || s[i+1] == '\'') {
+				escaped = true
+			} else {
+				b.WriteRune(r)
+			}
 			have = true
 		case r == '\'' && !inDouble:
 			inSingle = !inSingle
@@ -720,6 +776,18 @@ func splitShellFields(s string) ([]string, error) {
 		fields = append(fields, b.String())
 	}
 	return fields, nil
+}
+
+// SplitCommandArguments parses a human-readable argument list without
+// interpreting path backslashes or shell operators.
+func SplitCommandArguments(s string) ([]string, error) {
+	return splitShellFields(s)
+}
+
+func looksLikeWindowsPath(value string) bool {
+	return len(value) >= 2 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' ||
+		strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, `.\`) ||
+		strings.HasPrefix(value, `..\`) || strings.HasPrefix(value, `\`)
 }
 
 func (l *LocalExecutor) IsRemote() bool { return false }
@@ -1301,8 +1369,8 @@ func (s *SSHExecutor) run(cmdStr string, retryOnWriteFailure bool, onLine func(s
 		cmdStr = ForceNonInteractiveSudo(cmdStr)
 	}
 
-	if strings.Contains(cmdStr, "local_run ") {
-		realCmd := strings.ReplaceAll(cmdStr, "local_run ", "")
+	if strings.HasPrefix(cmdStr, "local_run ") {
+		realCmd := strings.TrimPrefix(cmdStr, "local_run ")
 		outputStr, err := runLocalShellCommandWithStop(realCmd, onLine, stop)
 
 		if err != nil {
@@ -1397,25 +1465,9 @@ func (s *SSHExecutor) run(cmdStr string, retryOnWriteFailure bool, onLine func(s
 }
 
 func normalizeRemoteCommand(cmd string) string {
-	cmd = strings.TrimSpace(cmd)
-	if !strings.Contains(cmd, `\u`) && !strings.Contains(cmd, `\U`) {
-		return cmd
-	}
-	var b strings.Builder
-	for i := 0; i < len(cmd); i++ {
-		if cmd[i] != '\\' || i+5 >= len(cmd) || (cmd[i+1] != 'u' && cmd[i+1] != 'U') {
-			b.WriteByte(cmd[i])
-			continue
-		}
-		v, err := strconv.ParseInt(cmd[i+2:i+6], 16, 32)
-		if err != nil {
-			b.WriteByte(cmd[i])
-			continue
-		}
-		b.WriteRune(rune(v))
-		i += 5
-	}
-	return b.String()
+	// Commands have already crossed the JSON boundary. Decoding again would
+	// turn literal regexes and path components such as \u0041 into "A".
+	return strings.TrimSpace(cmd)
 }
 
 func isSSHConnectionError(err error) bool {

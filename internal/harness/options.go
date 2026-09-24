@@ -89,6 +89,7 @@ func defaultMiddlewareStack(catalog *skills.SkillCatalog, memStore *memory.Store
 // SubAgentMiddlewareStack 子 Agent 用精简栈（无 sub-sub-agent）
 func SubAgentMiddlewareStack(catalog *skills.SkillCatalog, memStore *memory.Store) []Middleware {
 	return []Middleware{
+		NewMemoryMiddleware(memStore),
 		NewTodoMiddleware(),
 		NewSkillsMiddleware(catalog),
 		NewToolsMiddleware(catalog),

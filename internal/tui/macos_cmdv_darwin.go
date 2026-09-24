@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ebitengine/purego"
@@ -20,12 +22,31 @@ const (
 	cgEventSourceStateHID = 1
 	keyCodeCommand        = 0x37
 	keyCodeRightCommand   = 0x36
+	keyCodeShift          = 0x38
+	keyCodeRightShift     = 0x3C
+	keyCodeA              = 0x00
+	keyCodeZ              = 0x06
 	keyCodeV              = 0x09
 )
 
 var (
 	hidOnce     sync.Once
 	hidKeyState func(int32, uint16) bool
+
+	macEditOnce  sync.Once
+	macEditTapOn atomic.Bool
+	macEditRunCF uintptr
+
+	cgEventTapCreate            func(uint32, uint32, uint32, uint64, uintptr, uintptr) uintptr
+	cgEventTapEnable            func(uintptr, bool)
+	cgEventGetFlags             func(uintptr) uint64
+	cgEventGetIntegerValueField func(uintptr, uint32) int64
+	cfMachPortCreateRunLoopSrc  func(uintptr, uintptr, int) uintptr
+	cfRunLoopGetCurrent         func() uintptr
+	cfRunLoopAddSource          func(uintptr, uintptr, uintptr)
+	cfRunLoopRun                func()
+	cfRunLoopStop               func(uintptr)
+	kCFRunLoopCommonModes       uintptr
 )
 
 type macOSPasteSession struct {
@@ -45,11 +66,16 @@ func startMacOSCmdVWatcher(p *tea.Program) func() {
 	}
 	session := resolveMacOSPasteSession(os.Getpid(), currentTTYPath())
 	stop := make(chan struct{})
-	go pollMacOSCmdV(stop, session, func() {
+	fire := func(msg tea.Msg) {
 		defer func() { _ = recover() }()
-		p.Send(macosCmdVMsg{})
-	})
-	return func() { close(stop) }
+		p.Send(msg)
+	}
+	stopTap := startMacEditTap(session, fire)
+	go pollMacOSCmdV(stop, session, fire)
+	return func() {
+		close(stop)
+		stopTap()
+	}
 }
 
 func loadHIDKeyState() {
@@ -62,8 +88,102 @@ func loadHIDKeyState() {
 	})
 }
 
-func pollMacOSCmdV(stop <-chan struct{}, session macOSPasteSession, fire func()) {
-	wasDown := false
+func startMacEditTap(_ macOSPasteSession, fire func(tea.Msg)) func() {
+	loadMacEditTap()
+	if cgEventTapCreate == nil || cfRunLoopRun == nil {
+		return func() {}
+	}
+	callback := purego.NewCallback(func(_, typ, event, _ uintptr) uintptr {
+		const (
+			keyDown         = 10
+			tapDisabled     = 0xFFFFFFFE
+			keyboardKeycode = 9
+		)
+		if typ == tapDisabled {
+			if tap := macEditTap; tap != 0 && cgEventTapEnable != nil {
+				cgEventTapEnable(tap, true)
+			}
+			return 0
+		}
+		if typ != keyDown || event == 0 || cgEventGetFlags == nil || !macHostFocused.Load() {
+			return event
+		}
+		msg, swallow := macEditChordToSwallow(cgEventGetFlags(event), cgEventGetIntegerValueField(event, keyboardKeycode))
+		if !swallow {
+			return event
+		}
+		if teaMsg, ok := msg.(tea.Msg); ok {
+			fire(teaMsg)
+		}
+		return 0
+	})
+	const (
+		sessionTap  = 1
+		headInsert  = 0
+		defaultOpts = 0
+		keyDown     = 10
+		eventMask   = uint64(1) << keyDown
+	)
+	tap := cgEventTapCreate(sessionTap, headInsert, defaultOpts, eventMask, callback, 0)
+	if tap == 0 {
+		return func() {}
+	}
+	source := cfMachPortCreateRunLoopSrc(0, tap, 0)
+	if source == 0 {
+		return func() {}
+	}
+	macEditTap = tap
+	macEditTapOn.Store(true)
+	go func() {
+		rl := cfRunLoopGetCurrent()
+		macEditRunCF = rl
+		cfRunLoopAddSource(rl, source, kCFRunLoopCommonModes)
+		cgEventTapEnable(tap, true)
+		cfRunLoopRun()
+	}()
+	return func() {
+		if rl := macEditRunCF; rl != 0 && cfRunLoopStop != nil {
+			cfRunLoopStop(rl)
+		}
+	}
+}
+
+var (
+	macHostFocused atomic.Bool
+	macEditTap     uintptr
+)
+
+func loadMacEditTap() {
+	macEditOnce.Do(func() {
+		defer func() { _ = recover() }()
+		core, err := purego.Dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", purego.RTLD_NOW)
+		if err != nil {
+			return
+		}
+		foundation, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_NOW)
+		if err != nil {
+			return
+		}
+		purego.RegisterLibFunc(&cgEventTapCreate, core, "CGEventTapCreate")
+		purego.RegisterLibFunc(&cgEventTapEnable, core, "CGEventTapEnable")
+		purego.RegisterLibFunc(&cgEventGetFlags, core, "CGEventGetFlags")
+		purego.RegisterLibFunc(&cgEventGetIntegerValueField, core, "CGEventGetIntegerValueField")
+		purego.RegisterLibFunc(&cfMachPortCreateRunLoopSrc, foundation, "CFMachPortCreateRunLoopSource")
+		purego.RegisterLibFunc(&cfRunLoopGetCurrent, foundation, "CFRunLoopGetCurrent")
+		purego.RegisterLibFunc(&cfRunLoopAddSource, foundation, "CFRunLoopAddSource")
+		purego.RegisterLibFunc(&cfRunLoopRun, foundation, "CFRunLoopRun")
+		purego.RegisterLibFunc(&cfRunLoopStop, foundation, "CFRunLoopStop")
+		sym, err := purego.Dlsym(foundation, "kCFRunLoopCommonModes")
+		if err != nil || sym == 0 {
+			cgEventTapCreate = nil
+			return
+		}
+		kCFRunLoopCommonModes = **(**uintptr)(unsafe.Pointer(&sym))
+	})
+}
+
+func pollMacOSCmdV(stop <-chan struct{}, session macOSPasteSession, fire func(tea.Msg)) {
+	var wasV, wasA, wasZ bool
 	ticker := time.NewTicker(30 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -71,21 +191,43 @@ func pollMacOSCmdV(stop <-chan struct{}, session macOSPasteSession, fire func())
 		case <-stop:
 			return
 		case <-ticker.C:
-			down := commandVPressed()
-			if down && !wasDown && deepSentryWindowFocused(session) {
-				fire()
+			v, a, z := macCommandChords()
+			focused := deepSentryWindowFocused(session)
+			macHostFocused.Store(focused)
+			if !focused {
+				wasV, wasA, wasZ = v, a, z
+				continue
 			}
-			wasDown = down
+			if v && !wasV {
+				fire(macosCmdVMsg{})
+			}
+			// The event tap already delivers and swallows these. Polling them
+			// too would undo twice, and would not stop the terminal select-all.
+			if !macEditTapOn.Load() {
+				if a && !wasA {
+					fire(macosCmdAMsg{})
+				}
+				if z && !wasZ {
+					fire(macosCmdZMsg{})
+				}
+			}
+			wasV, wasA, wasZ = v, a, z
 		}
 	}
 }
 
-func commandVPressed() bool {
+func macCommandChords() (v, a, z bool) {
 	if hidKeyState == nil {
-		return false
+		return false, false, false
 	}
 	cmd := hidKeyState(cgEventSourceStateHID, keyCodeCommand) || hidKeyState(cgEventSourceStateHID, keyCodeRightCommand)
-	return cmd && hidKeyState(cgEventSourceStateHID, keyCodeV)
+	if !cmd {
+		return false, false, false
+	}
+	shift := hidKeyState(cgEventSourceStateHID, keyCodeShift) || hidKeyState(cgEventSourceStateHID, keyCodeRightShift)
+	return hidKeyState(cgEventSourceStateHID, keyCodeV),
+		hidKeyState(cgEventSourceStateHID, keyCodeA),
+		!shift && hidKeyState(cgEventSourceStateHID, keyCodeZ)
 }
 
 func deepSentryWindowFocused(session macOSPasteSession) bool {

@@ -5,6 +5,8 @@ import (
 	"ai-edr/internal/config"
 	"ai-edr/internal/harness"
 	"ai-edr/internal/skills"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -78,6 +81,69 @@ func TestImageSlashCommandRejectsNonImageFile(t *testing.T) {
 	}
 }
 
+func TestWindowsPasteTargetFocused(t *testing.T) {
+	ancestors := []int{20, 10}
+	if !windowsPasteTargetFocused(30, ancestors, 30) || !windowsPasteTargetFocused(30, ancestors, 20) {
+		t.Fatal("self and ancestor windows should receive Ctrl+V")
+	}
+	if windowsPasteTargetFocused(30, ancestors, 99) || windowsPasteTargetFocused(0, ancestors, 10) {
+		t.Fatal("another process must not receive Ctrl+V")
+	}
+}
+
+func TestWindowsClipboardCommandKeepsPathInsideScript(t *testing.T) {
+	path := `E:\Deepsentry\reports\attachments\session_1\clipboard_20260923_084030.png`
+	exe, args := windowsClipboardPowerShell(path)
+	if !strings.HasSuffix(exe, `powershell.exe`) {
+		t.Fatalf("powershell path: %s", exe)
+	}
+	if len(args) != 6 || args[3] != "-STA" || args[4] != "-EncodedCommand" {
+		t.Fatalf("args: %#v", args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, `E:\`) {
+			t.Fatalf("path leaked into argv: %#v", args)
+		}
+	}
+	script := decodePowerShellCommand(t, args[5])
+	if !strings.Contains(script, `$img.Save('`+path+`',`) || !strings.Contains(script, `GetDataPresent`) || strings.Contains(script, "-Command") {
+		t.Fatalf("script: %s", script)
+	}
+	if got := decodePowerShellCommand(t, argsFromPowerShell(`E:\a'b.png`)); !strings.Contains(got, `$img.Save('E:\a''b.png',`) {
+		t.Fatalf("quote escape: %s", got)
+	}
+}
+
+func decodePowerShellCommand(t *testing.T, encoded string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	units := make([]uint16, len(raw)/2)
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(units))
+}
+
+func argsFromPowerShell(path string) string {
+	_, args := windowsClipboardPowerShell(path)
+	return args[5]
+}
+
+func TestClipboardImageErrorIgnoresEmptyTextSuccess(t *testing.T) {
+	result := resolveClipboardPaste(
+		"session",
+		func(string) (string, error) { return "", errors.New("剪贴板中没有可读取的 PNG 图片") },
+		func() (string, error) { return "", errors.New("The operation completed successfully.") },
+		analyzer.PrepareImageAttachment,
+	)
+	if result.err == nil || strings.Contains(result.err.Error(), "读取文本也失败") || strings.Contains(result.err.Error(), "operation completed") {
+		t.Fatalf("text success masked the image error: %v", result.err)
+	}
+}
+
 func TestCtrlVPrioritizesClipboardImageAndFallsBackToText(t *testing.T) {
 	imagePath := writeTUIImageFixture(t)
 	imageResult := resolveClipboardPaste(
@@ -134,8 +200,10 @@ func TestCtrlVRemovesRejectedClipboardImage(t *testing.T) {
 }
 
 func TestCtrlVShortcutStartsDirectClipboardPaste(t *testing.T) {
-	m := NewAgentModel(nil, "vision-model", "local", 30, true, false, StartupInfo{})
-	m.input.Focus()
+	m := NewAgentModel(nil, "vision-model", "local", 30, false, false, StartupInfo{})
+	if m.input.Focused() {
+		t.Fatal("input should start blurred when there is no pending goal")
+	}
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
 	m = updated.(AgentModel)
 	if cmd == nil {
@@ -143,6 +211,9 @@ func TestCtrlVShortcutStartsDirectClipboardPaste(t *testing.T) {
 	}
 	if len(m.lines) == 0 || !strings.Contains(m.lines[len(m.lines)-1].content, "图片优先") {
 		t.Fatalf("Ctrl+V feedback missing: %#v", m.lines)
+	}
+	if !m.input.Focused() {
+		t.Fatal("Ctrl+V should focus the input before reading the clipboard")
 	}
 }
 
@@ -161,6 +232,19 @@ func TestCmdVShortcutStartsDirectClipboardPaste(t *testing.T) {
 	if _, ok := updated.(AgentModel); !ok {
 		t.Fatal("ignored Command+V image miss should be a no-op")
 	}
+	dup := NewAgentModel(nil, "vision-model", "local", 30, true, false, StartupInfo{})
+	updated, first := dup.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	dup = updated.(AgentModel)
+	_, second := dup.Update(macosCmdVMsg{})
+	if first == nil || second != nil {
+		t.Fatal("console Ctrl+V and the key watcher must attach the clipboard only once")
+	}
+	blurred := NewAgentModel(nil, "vision-model", "local", 30, false, false, StartupInfo{})
+	updated, cmd = blurred.Update(macosCmdVMsg{})
+	blurred = updated.(AgentModel)
+	if cmd == nil || !blurred.input.Focused() {
+		t.Fatal("image paste chord should focus the input and read the clipboard")
+	}
 }
 
 func TestLooksLikeLocalImagePath(t *testing.T) {
@@ -170,6 +254,9 @@ func TestLooksLikeLocalImagePath(t *testing.T) {
 	}
 	if _, ok := looksLikeLocalImagePath("not-an-image.txt"); ok {
 		t.Fatal("non-image path was treated as an image")
+	}
+	if got, ok := looksLikeLocalImagePath(path + "\n"); !ok || got != path {
+		t.Fatalf("trailing newline should still attach the image path: got=%q ok=%v", got, ok)
 	}
 }
 
@@ -208,6 +295,18 @@ func TestSkillCommandFieldsAcceptQuotedAndEscapedPackagePaths(t *testing.T) {
 	fields, err = splitSkillCommandFields(`/skill\ packages/demo.skill force`)
 	if err != nil || len(fields) != 2 || fields[0] != "/skill packages/demo.skill" {
 		t.Fatalf("escaped fields=%#v err=%v", fields, err)
+	}
+	fields, err = splitSkillCommandFields(`import "C:\Program Files\Skills\demo.skill"`)
+	if err != nil || len(fields) != 2 || fields[1] != `C:\Program Files\Skills\demo.skill` {
+		t.Fatalf("Windows path fields=%#v err=%v", fields, err)
+	}
+	fields, err = splitSkillCommandFields(`import "\\server\shared skills\demo.skill"`)
+	if err != nil || len(fields) != 2 || fields[1] != `\\server\shared skills\demo.skill` {
+		t.Fatalf("UNC path fields=%#v err=%v", fields, err)
+	}
+	fields, err = splitSkillCommandFields(`add "C:\Skills\"`)
+	if err != nil || len(fields) != 2 || fields[1] != `C:\Skills\` {
+		t.Fatalf("trailing Windows separator fields=%#v err=%v", fields, err)
 	}
 }
 
@@ -881,6 +980,38 @@ func TestStreamCollapseControlsAppearOnlyAfterCompletion(t *testing.T) {
 	}
 }
 
+func TestStreamDeltasMaterializeOnRefreshAndEndRestoresFullText(t *testing.T) {
+	m := NewAgentModel(nil, "model", "local", 30, false, false, StartupInfo{})
+	m.appendStreamDelta(`{"thought":"hello`)
+	m.appendStreamDelta(` world"}`)
+	if m.lines[m.streamIdx].raw != "" {
+		t.Fatal("stream was rebuilt before a viewport refresh")
+	}
+	m.refreshViewport()
+	if got := m.lines[m.streamIdx].raw; got != `{"thought":"hello world"}` {
+		t.Fatalf("materialized stream = %q", got)
+	}
+	if !strings.Contains(m.lines[m.streamIdx].content, "hello world") {
+		t.Fatalf("stream display = %q", m.lines[m.streamIdx].content)
+	}
+	m.finalizeStream(`{"thought":"hello world from the full end event"}`)
+	if got := m.lines[len(m.lines)-1].raw; got != `{"thought":"hello world from the full end event"}` {
+		t.Fatalf("end event did not restore complete stream: %q", got)
+	}
+	if len(m.streamRaw) != 0 || m.streamDirty {
+		t.Fatal("finished stream buffer was retained")
+	}
+}
+
+func TestStreamEndRestoresLineWhenAllPreviewDeltasWereDropped(t *testing.T) {
+	m := NewAgentModel(nil, "model", "local", 30, false, false, StartupInfo{})
+	full := `{"thought":"complete despite display backpressure"}`
+	m.finalizeStream(full)
+	if len(m.lines) == 0 || m.lines[len(m.lines)-1].kind != "stream" || m.lines[len(m.lines)-1].raw != full {
+		t.Fatalf("full stream event was lost: %#v", m.lines)
+	}
+}
+
 func TestTrimmedCommandGroupStillHasCollapsibleHead(t *testing.T) {
 	m := NewAgentModel(nil, "model", "local", 30, false, false, StartupInfo{})
 	m.appendLine("user", "You: 最初的对话", "最初的对话")
@@ -1077,6 +1208,35 @@ func TestHistoryTrimmingPreservesConversationAndShowsNotice(t *testing.T) {
 	m.viewport.GotoTop()
 	if view := stripANSIForTest(m.viewport.View()); !strings.Contains(view, "用户对话、询问和最终结论已保留") {
 		t.Fatalf("history compaction notice missing:\n%s", view)
+	}
+}
+
+func TestFocusedEmptyInputLeavesHintOffTheCompositionLine(t *testing.T) {
+	m := NewAgentModel(nil, "model", "local", 30, false, false, StartupInfo{})
+	m.width, m.height = 80, 24
+	m.sessionLive = true
+	m.input.Focus()
+	m.recalcLayout()
+
+	rows, _, _ := m.focusedInputRows(ChromeContentWidth(m.width) - 2)
+	rendered := stripANSIForTest(strings.Join(rows, "\n"))
+	if strings.Contains(rendered, "追问上一题") || strings.Contains(rendered, "Enter 发送") {
+		t.Fatalf("hint was painted into the focused input row: %q", rendered)
+	}
+	view := stripANSIForTest(m.View())
+	if !strings.Contains(view, "追问上一题或继续排查，Enter 发送") {
+		t.Fatalf("hint should stay on the help line:\n%s", view)
+	}
+
+	m.input.SetValue("yi")
+	m.input.SetCursor(2)
+	rows, _, _ = m.focusedInputRows(ChromeContentWidth(m.width) - 2)
+	rendered = stripANSIForTest(strings.Join(rows, "\n"))
+	if strings.Contains(rendered, "追问上一题") {
+		t.Fatalf("hint leaked into typed input: %q", rendered)
+	}
+	if !strings.Contains(rendered, "yi") {
+		t.Fatalf("typed text missing: %q", rendered)
 	}
 }
 
@@ -1654,7 +1814,7 @@ func TestSplitSlashCommandKeepsArgument(t *testing.T) {
 
 func TestSlashCommandNamesIncludeNewAndCost(t *testing.T) {
 	names := slashCommandNames()
-	for _, want := range []string{"/new", "/restart", "/cost", "/tsecbench", "/sudo", "/mcp", "/skill", "/exit", "/quit"} {
+	for _, want := range []string{"/new", "/restart", "/cost", "/tsecbench", "/sudo", "/mcp", "/skill", "/schedule", "/exit", "/quit"} {
 		if !strings.Contains(names, want) {
 			t.Fatalf("slash commands missing %s: %s", want, names)
 		}
@@ -1943,7 +2103,7 @@ func assertFocusedInputFooterVisible(t *testing.T, m AgentModel) {
 	lines := strings.Split(view, "\n")
 	footerStart := max(0, len(lines)-5)
 	footer := strings.Join(lines[footerStart:], "\n")
-	if !strings.Contains(footer, "task, Enter to start") {
+	if !strings.Contains(footer, "描述安全任务，Enter 开始") {
 		t.Fatalf("focused input footer is missing from the bottom of the view:\n%s", footer)
 	}
 }

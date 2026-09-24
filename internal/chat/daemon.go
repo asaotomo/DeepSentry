@@ -115,6 +115,9 @@ func StartOwnedChat(cfg config.ChatConfig, h Handoff) (*exec.Cmd, error) {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
 		return nil, err
 	}
+	if err := rotateDaemonLog(logPath); err != nil {
+		return nil, err
+	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err

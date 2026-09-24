@@ -17,21 +17,23 @@ import (
 )
 
 // CheckpointData 会话 checkpoint 快照
-const currentCheckpointSchemaVersion = 3
+const currentCheckpointSchemaVersion = 4
 
 type CheckpointData struct {
-	SchemaVersion   int                `json:"schema_version"`
-	RuntimeVersion  string             `json:"runtime_version,omitempty"`
-	RunID           string             `json:"run_id,omitempty"`
-	TurnID          string             `json:"turn_id,omitempty"`
-	EventCursor     int64              `json:"event_cursor,omitempty"`
-	SessionID       string             `json:"session_id"`
-	StepNum         int                `json:"step_num"`
-	UserGoal        string             `json:"user_goal,omitempty"`
-	State           *AgentState        `json:"state"`
-	History         []analyzer.Message `json:"history"`
-	SavedAt         time.Time          `json:"saved_at"`
-	IntegritySHA256 string             `json:"integrity_sha256,omitempty"`
+	SchemaVersion   int                 `json:"schema_version"`
+	RuntimeVersion  string              `json:"runtime_version,omitempty"`
+	RunID           string              `json:"run_id,omitempty"`
+	TurnID          string              `json:"turn_id,omitempty"`
+	EventCursor     int64               `json:"event_cursor,omitempty"`
+	SessionID       string              `json:"session_id"`
+	StepNum         int                 `json:"step_num"`
+	UserGoal        string              `json:"user_goal,omitempty"`
+	State           *AgentState         `json:"state"`
+	History         []analyzer.Message  `json:"history"`
+	SubAgentKeys    *[]string           `json:"sub_agent_keys,omitempty"` // present, even empty, scopes children to this parent task
+	SubAgent        *SubAgentCheckpoint `json:"sub_agent,omitempty"`
+	SavedAt         time.Time           `json:"saved_at"`
+	IntegritySHA256 string              `json:"integrity_sha256,omitempty"`
 }
 
 // CheckpointStore checkpoint 持久化
@@ -88,9 +90,10 @@ func (c *CheckpointStore) Save(data CheckpointData) error {
 	if err != nil {
 		return err
 	}
+	// v4 covers the complete redacted JSON object, including fields unknown to
+	// older binaries. v1-v3 keep their original typed checksum for compatibility.
 	sum := sha256.Sum256(raw)
-	data.IntegritySHA256 = fmt.Sprintf("%x", sum[:])
-	raw, err = security.RedactJSON(data)
+	raw, err = checkpointAddIntegrity(raw, fmt.Sprintf("%x", sum[:]))
 	if err != nil {
 		return err
 	}
@@ -116,6 +119,19 @@ func (c *CheckpointStore) Save(data CheckpointData) error {
 		return err
 	}
 	return rotateCheckpointFile(tmp, filepath.Join(c.dir, "checkpoint.json"), filepath.Join(c.dir, "checkpoint.prev.json"))
+}
+
+func checkpointAddIntegrity(redacted []byte, digest string) ([]byte, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(redacted, &object); err != nil {
+		return nil, err
+	}
+	encodedDigest, err := json.Marshal(digest)
+	if err != nil {
+		return nil, err
+	}
+	object["integrity_sha256"] = encodedDigest
+	return json.MarshalIndent(object, "", "  ")
 }
 
 func rotateCheckpointFile(src, dst, previous string) error {
@@ -157,9 +173,22 @@ func LoadCheckpoint(sessionID string) (*CheckpointData, error) {
 		return nil, err
 	}
 	path := filepath.Join(home, ".deepsentry", "sessions", sessionID, "checkpoint.json")
+	return loadCheckpointFile(path)
+}
+
+func loadCheckpointFile(path string) (*CheckpointData, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("无法加载会话 %s: %w", sessionID, err)
+		if os.IsNotExist(err) {
+			previous := filepath.Join(filepath.Dir(path), "checkpoint.prev.json")
+			if priorRaw, priorErr := os.ReadFile(previous); priorErr == nil {
+				if prior, priorErr := decodeCheckpoint(priorRaw); priorErr == nil {
+					initializeCheckpointState(prior)
+					return prior, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("无法加载 checkpoint %s: %w", path, err)
 	}
 	data, err := decodeCheckpoint(raw)
 	if err != nil {
@@ -184,7 +213,13 @@ func decodeCheckpoint(raw []byte) (*CheckpointData, error) {
 	if data.IntegritySHA256 != "" {
 		want := data.IntegritySHA256
 		data.IntegritySHA256 = ""
-		canonical, err := security.RedactJSON(data)
+		var canonical []byte
+		var err error
+		if data.SchemaVersion >= 4 {
+			canonical, err = checkpointIntegrityPayload(raw)
+		} else {
+			canonical, err = security.RedactJSON(data)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -200,8 +235,17 @@ func decodeCheckpoint(raw []byte) (*CheckpointData, error) {
 	return &data, nil
 }
 
+func checkpointIntegrityPayload(raw []byte) ([]byte, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, err
+	}
+	delete(object, "integrity_sha256")
+	return json.MarshalIndent(object, "", "  ")
+}
+
 func initializeCheckpointState(data *CheckpointData) {
-	legacyBoundary := data.SchemaVersion < currentCheckpointSchemaVersion
+	legacyBoundary := data.SchemaVersion < 3
 	if strings.TrimSpace(data.RuntimeVersion) == "" {
 		data.RuntimeVersion = "legacy"
 	}
@@ -244,13 +288,39 @@ func initializeCheckpointState(data *CheckpointData) {
 	}
 }
 
+// SessionRoot is the directory that holds one subdirectory per checkpoint.
+func SessionRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".deepsentry", "sessions"), nil
+}
+
+// RemoveSession deletes one checkpoint directory. The id must already be a
+// validated session id so a bad value cannot escape the sessions directory.
+func RemoveSession(sessionID string) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
+	root, err := SessionRoot()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(root, sessionID)
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.Contains(rel, string(filepath.Separator)) {
+		return fmt.Errorf("拒绝删除会话目录: %s", sessionID)
+	}
+	return os.RemoveAll(dir)
+}
+
 // ListSessions 列出可恢复的会话 ID
 func ListSessions() ([]string, error) {
-	home, err := os.UserHomeDir()
+	root, err := SessionRoot()
 	if err != nil {
 		return nil, err
 	}
-	root := filepath.Join(home, ".deepsentry", "sessions")
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {

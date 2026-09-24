@@ -117,7 +117,7 @@ func TestWizardProviderOptionsMapToBuiltInPresets(t *testing.T) {
 			t.Fatalf("wizardProviderID(%q) = %q, want %q", label, got, wantID)
 		}
 		preset, ok := config.FindProvider(wantID)
-		if !ok || preset.APIURL == "" || preset.Model == "" {
+		if !ok || preset.APIURL == "" || (preset.Model == "" && !config.IsLocalProvider(wantID)) {
 			t.Fatalf("wizard option %q has no complete preset: %+v", label, preset)
 		}
 		found := false
@@ -130,6 +130,16 @@ func TestWizardProviderOptionsMapToBuiltInPresets(t *testing.T) {
 		if !found {
 			t.Fatalf("wizard option %q is not selectable", label)
 		}
+	}
+}
+
+func TestWizardLocalModelSuggestionsUseDiscoveredIDs(t *testing.T) {
+	suggest := wizardModelSuggestions("ollama", "qwen3:14b", "gemma4:31b")
+	if got := suggest("qwen"); len(got) != 1 || got[0] != "qwen3:14b" {
+		t.Fatalf("local suggestions=%v", got)
+	}
+	if got := wizardModelSuggestions("vllm")("anything"); len(got) != 0 {
+		t.Fatalf("vLLM must not suggest an invented model: %v", got)
 	}
 }
 

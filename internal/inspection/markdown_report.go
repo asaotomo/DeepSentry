@@ -127,6 +127,7 @@ func reportSearchRoots() []string {
 }
 
 func scoreSessionReportFile(path string) int {
+	// #nosec G703 -- Source is the local operator-set DEEPSENTRY_REPORT_PATH or locally discovered report files.
 	st, err := os.Stat(path)
 	if err != nil || !st.Mode().IsRegular() {
 		return -1
@@ -157,6 +158,7 @@ func scoreSessionReportFile(path string) int {
 }
 
 func peekReportFile(path string) ([]byte, error) {
+	// #nosec G703 -- Local report compilation accepts operator-selected source paths; this is a bounded read, not an extraction destination.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -275,7 +277,6 @@ func extractDeliverableMarkdown(md string) string {
 type reportChapter struct {
 	title string
 	body  string
-	kind  string
 }
 
 func organizeInspectionMarkdown(md string, images []string) string {
@@ -649,10 +650,6 @@ func lastReportLikeSection(sections []auditSection) string {
 		return best
 	}
 	return fallback
-}
-
-func reportLikeBody(body string) bool {
-	return reportBodyScore(body) >= 20
 }
 
 func reportBodyScore(body string) int {
@@ -1115,13 +1112,4 @@ func isGenericReportTitle(s string) bool {
 func lookLikeMetaLine(s string) bool {
 	s = strings.TrimSpace(strings.TrimPrefix(s, "- "))
 	return strings.HasPrefix(s, "**启动时间**") || strings.HasPrefix(s, "**操作员**") || strings.HasPrefix(s, "**工具版本**") || strings.HasPrefix(s, "启动时间")
-}
-
-func parseReportMetaTime(s string) (time.Time, bool) {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndex(s, ": "); i >= 0 {
-		s = strings.TrimSpace(s[i+2:])
-	}
-	t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local)
-	return t, err == nil
 }

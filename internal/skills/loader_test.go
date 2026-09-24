@@ -60,6 +60,7 @@ func TestLoadCatalogHonorsClaudeAndCodexInvocationPolicies(t *testing.T) {
 	writeSkill("explicit", "name: explicit\ndescription: Explicit only\ndisable-model-invocation: true\n", "")
 	writeSkill("model-only", "name: model-only\ndescription: Model only\nuser-invocable: false\n", "")
 	writeSkill("codex-policy", "name: codex-policy\ndescription: Codex policy\n", "policy:\n  allow_implicit_invocation: false\n")
+	writeSkill("both-policies", "name: both-policies\ndescription: Both policies\ndisable-model-invocation: true\n", "policy:\n  allow_implicit_invocation: true\n")
 
 	catalog, err := LoadCatalog([]string{root})
 	if err != nil {
@@ -76,6 +77,10 @@ func TestLoadCatalogHonorsClaudeAndCodexInvocationPolicies(t *testing.T) {
 	codex, ok := catalog.FindSkill("codex-policy")
 	if !ok || codex.AllowImplicit || codex.InvocationSource != "agents/openai.yaml" {
 		t.Fatalf("unexpected Codex policy metadata: %#v", codex)
+	}
+	both, ok := catalog.FindSkill("both-policies")
+	if !ok || both.AllowImplicit {
+		t.Fatalf("SKILL.md opt-out was overridden by agents/openai.yaml: %#v", both)
 	}
 	prompt := catalog.FormatCatalogPrompt()
 	if strings.Contains(prompt, "**explicit**") || strings.Contains(prompt, "**codex-policy**") || !strings.Contains(prompt, "**model-only**") {
@@ -124,12 +129,63 @@ func TestResolveSourcesAlwaysIncludesManagedRootAndHonorsDisable(t *testing.T) {
 	custom := filepath.Join(home, "custom-skills")
 	managed := filepath.Join(home, ".deepsentry", "skills")
 	sources := ResolveSources([]string{custom, custom}, nil)
-	if len(sources) != 2 || sources[0] != custom || sources[1] != managed {
+	if len(sources) < 2 || sources[len(sources)-2] != custom || sources[len(sources)-1] != managed {
 		t.Fatalf("resolved sources=%#v", sources)
 	}
 	sources = ResolveSources([]string{custom}, []string{managed})
-	if len(sources) != 1 || sources[0] != custom {
+	if len(sources) == 0 || sources[len(sources)-1] != custom {
 		t.Fatalf("disabled managed root should be absent: %#v", sources)
+	}
+	for _, source := range sources {
+		if source == managed {
+			t.Fatalf("disabled managed root should be absent: %#v", sources)
+		}
+	}
+}
+
+func TestCatalogKeepsRelativeRootStableAcrossWorkingDirectoryChange(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "skills", "audit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "---\nname: audit\ndescription: Audit\n---\n# Body\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	catalog, err := LoadCatalog([]string{"skills"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	if err := catalog.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := catalog.FindSkill("audit")
+	if !ok || !filepath.IsAbs(meta.Path) {
+		t.Fatalf("relative Skill root was lost after cwd change: %#v", catalog.Skills)
+	}
+}
+
+func TestDefaultSourcesIncludeBundledSkillsBesideExecutable(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	want := filepath.Join(filepath.Dir(executable), "bundled-skills")
+	found := false
+	for _, source := range DefaultSources() {
+		if source == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("default sources do not include installed playbooks beside %s: %#v", executable, DefaultSources())
 	}
 }
 
@@ -296,7 +352,11 @@ Use scripts/fofa_recon.py search --query 'app="nginx"'
 	if !ok {
 		t.Fatal("expected fofamap skill")
 	}
-	if meta.Dir != bundled {
+	resolvedBundled, err := filepath.EvalSymlinks(bundled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Dir != resolvedBundled {
 		t.Fatalf("python playbook overwrote MCP skill: dir=%s", meta.Dir)
 	}
 	content, err := LoadSkillContent(*meta)
@@ -305,5 +365,49 @@ Use scripts/fofa_recon.py search --query 'app="nginx"'
 	}
 	if !strings.Contains(content, "fofa_account") || strings.Contains(content, "app=\"nginx\"") {
 		t.Fatalf("unexpected fofamap skill content:\n%s", content)
+	}
+}
+
+func TestLoadCatalogCaseInsensitiveOverrideKeepsLastSource(t *testing.T) {
+	root := t.TempDir()
+	for _, entry := range []struct{ source, dir, name, description string }{
+		{"bundled", "audit", "Audit", "bundled version"},
+		{"managed", "audit", "audit", "managed version"},
+	} {
+		dir := filepath.Join(root, entry.source, entry.dir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		doc := "---\nname: " + entry.name + "\ndescription: " + entry.description + "\n---\n# Body\n"
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog, err := LoadCatalog([]string{filepath.Join(root, "bundled"), filepath.Join(root, "managed")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Skills) != 1 || catalog.Skills[0].Description != "managed version" {
+		t.Fatalf("same-name Skill should be overridden case-insensitively: %#v", catalog.Skills)
+	}
+}
+
+func TestLoadCatalogParsesWindowsBOMAndDelimiterInsideDescription(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "windows-skill")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "\ufeff---\r\nname: windows-skill\r\ndescription: 'audit --- recover'\r\n---\r\n# Body\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadCatalog([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := catalog.FindSkill("windows-skill")
+	if !ok || meta.Description != "audit --- recover" {
+		t.Fatalf("Windows frontmatter was not parsed: %#v", catalog.Skills)
 	}
 }

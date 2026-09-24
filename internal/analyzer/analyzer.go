@@ -16,6 +16,7 @@ type Message struct {
 	ID               string            `json:"id,omitempty"`
 	Role             string            `json:"role"`
 	Content          string            `json:"content"`
+	Synthetic        bool              `json:"synthetic,omitempty"` // model-facing feedback, not a user turn
 	Attachments      []ImageAttachment `json:"attachments,omitempty"`
 	ReasoningContent string            `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
@@ -118,6 +119,8 @@ type AgentResponse struct {
 	NewString   string `json:"new_string"`
 	ReplaceAll  bool   `json:"replace_all"`
 	GlobPattern string `json:"glob_pattern"`
+	Offset      int    `json:"offset,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 
 	// NativeToolCalls preserves provider call IDs and every call in a single
 	// response. Legacy fields remain populated for single-call compatibility.
@@ -227,6 +230,8 @@ type CompatibilityResponse struct {
 	NewString      string                 `json:"new_string"`
 	ReplaceAll     bool                   `json:"replace_all"`
 	GlobPattern    string                 `json:"glob_pattern"`
+	Offset         int                    `json:"offset,omitempty"`
+	Limit          int                    `json:"limit,omitempty"`
 }
 
 // StepOptions Agent 单步选项
@@ -276,7 +281,7 @@ func RunAgentStepWithOptions(opts StepOptions) (AgentResponse, error) {
 		basePrompt = basePrompt + extraPrompt
 	}
 
-	// 增强 Windows 路径操作指南 & JSON 约束
+	// 增强 Windows 路径操作指南；输出约束与实际工具传输模式一致。
 	selfProtectionPrompt := `
 【⛔ 核心自我保护守则】
 1. 绝对禁止删除/移动 config.yaml, deepsentry.exe, reports/ 目录。
@@ -284,13 +289,22 @@ func RunAgentStepWithOptions(opts StepOptions) (AgentResponse, error) {
 【🪟 Windows 文件操作专家模式】
 1. **中文路径与乱码**：如果 'dir' 显示乱码，请使用通配符 (*.pdf) 操作，不要直接复制乱码文件名。
 2. **路径变量**：使用 PowerShell 时可直接用 $HOME。
-
+`
+	if opts.UseNativeTools && config.GlobalConfig.IsOpenAICompatible() {
+		selfProtectionPrompt += `
+【⚠️ 原生工具调用】
+需要操作时通过 API 的 tool_calls 调用已提供的工具；参数必须是合法 JSON 对象。不要把 <|channel|>、to=execute、<|message|> 等控制标记写进普通文本。最终答复可通过 agent_action 的 finish 动作返回。
+`
+	} else {
+		selfProtectionPrompt += `
 【⚠️ JSON 严格语法】
 1. 在 JSON 字符串值中，**双引号 (") 必须转义为 (\\")**。
 2. **反斜杠 (\\) 必须转义为 (\\\\)**。
 3. **严禁** Markdown 代码块或与 JSON 混排；说明只能放 thought 字段。
 4. 响应必须是纯 JSON 对象，以 { 开头、以 } 结尾。
+5. 若需要执行，输出 {"action":"execute","command":"实际命令"}；不要输出 to=execute 或其他控制标记。
 `
+	}
 	systemPrompt := basePrompt + selfProtectionPrompt
 
 	capabilities := config.GlobalConfig.EffectiveModelCapabilities()
@@ -378,6 +392,9 @@ func RunAgentStepWithOptions(opts StepOptions) (AgentResponse, error) {
 		}
 		// fallback to JSON content parse
 	}
+	if recovered, ok := recoverLocalControlMessage(rawResp); ok {
+		return finalizeResponse(recovered), nil
+	}
 
 	// 2. 清洗 JSON（支持 Markdown 代码块 + 前置说明文字）
 	cleanResp, prose := cleanJSON(rawResp)
@@ -413,7 +430,7 @@ func RunAgentStepWithOptions(opts StepOptions) (AgentResponse, error) {
 		}
 
 		if found && extractedCmd != "" {
-			compat.Command = decodeJSONUnicodeEscapes(extractedCmd)
+			compat.Command = extractedCmd
 			compat.Thought = "JSON 格式异常(转义错误)，已启用【字符级扫描】精确提取命令。"
 			compat.RiskLevel = "high"
 			err = nil
@@ -459,13 +476,15 @@ func RunAgentStepWithOptions(opts StepOptions) (AgentResponse, error) {
 		NewString:      compat.NewString,
 		ReplaceAll:     compat.ReplaceAll,
 		GlobPattern:    compat.GlobPattern,
+		Offset:         compat.Offset,
+		Limit:          compat.Limit,
 	}
 
 	// 适配 Command (兼容 string 或 []string)
 	if compat.Command != "" {
-		resp.Command = decodeJSONUnicodeEscapes(compat.Command)
+		resp.Command = compat.Command
 	} else if len(compat.CmdArray) > 0 {
-		resp.Command = decodeJSONUnicodeEscapes(compat.CmdArray[len(compat.CmdArray)-1])
+		resp.Command = compat.CmdArray[len(compat.CmdArray)-1]
 	}
 
 	// 适配 Thought
@@ -650,7 +669,100 @@ func finalizeResponse(resp AgentResponse) AgentResponse {
 	return resp
 }
 
+// UnescapeModelLineBreaks turns model text that still contains the two
+// characters "\n" into real paragraphs while preserving path and code escapes.
+func UnescapeModelLineBreaks(s string) string {
+	count := strings.Count(s, `\n`)
+	if count == 0 {
+		return s
+	}
+	if count == 1 && !markdownBoundaryAfter(s, strings.Index(s, `\n`)+2) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inlineTicks := 0
+	for i := 0; i < len(s); {
+		if s[i] == '`' {
+			j := i + 1
+			for j < len(s) && s[j] == '`' {
+				j++
+			}
+			run := j - i
+			if run < 3 {
+				if inlineTicks == 0 {
+					inlineTicks = run
+				} else if inlineTicks == run {
+					inlineTicks = 0
+				}
+			}
+			b.WriteString(s[i:j])
+			i = j
+			continue
+		}
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if inlineTicks != 0 || s[i+1] != 'n' || (i > 0 && s[i-1] == '\\') ||
+			asciiLetterAt(s, i+2) || (asciiDigitAt(s, i+2) && !numberedListAfter(s, i+2)) ||
+			(i+2 < len(s) && (s[i+2] == '\'' || s[i+2] == '"')) ||
+			(inWindowsPath(s, i) && (i > 0 && s[i-1] == ':' || !markdownBoundaryAfter(s, i+2))) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		b.WriteByte('\n')
+		i += 2
+	}
+	return b.String()
+}
+
+func asciiLetterAt(s string, i int) bool {
+	if i < 0 || i >= len(s) {
+		return false
+	}
+	c := s[i]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func asciiDigitAt(s string, i int) bool {
+	return i >= 0 && i < len(s) && s[i] >= '0' && s[i] <= '9'
+}
+
+func numberedListAfter(s string, i int) bool {
+	for asciiDigitAt(s, i) {
+		i++
+	}
+	return i+1 < len(s) && (s[i] == '.' || s[i] == ')') && s[i+1] == ' '
+}
+
+func markdownBoundaryAfter(s string, i int) bool {
+	if i >= len(s) {
+		return true
+	}
+	if strings.HasPrefix(s[i:], `\n`) || s[i] == '#' || s[i] == '`' {
+		return true
+	}
+	return i+1 < len(s) && (s[i] == '-' || s[i] == '*' || s[i] == '+') && s[i+1] == ' ' ||
+		numberedListAfter(s, i)
+}
+
+func inWindowsPath(s string, slash int) bool {
+	start := slash
+	for start > 0 && !strings.ContainsRune(" \t\r\n\"'`<>()[]{}", rune(s[start-1])) {
+		start--
+	}
+	token := s[start : slash+1]
+	return len(token) >= 3 && asciiLetterAt(token, 0) && token[1] == ':' && token[2] == '\\' ||
+		strings.HasPrefix(token, `\\`)
+}
+
 func normalizeResponseSemantics(resp AgentResponse) AgentResponse {
+	resp.Thought = UnescapeModelLineBreaks(resp.Thought)
+	resp.Question = UnescapeModelLineBreaks(resp.Question)
+	resp.FinalReport = UnescapeModelLineBreaks(resp.FinalReport)
 	action := strings.ToLower(strings.TrimSpace(resp.Action))
 	if action == "ask_user" {
 		question := strings.TrimSpace(resp.Question)
@@ -720,9 +832,12 @@ func nonEmptyStrings(values []string) []string {
 }
 
 const (
-	contextCompactKeepRecent  = 12
-	defaultHistoryTokenBudget = 18000
-	defaultSummaryChunkTokens = 12000
+	contextCompactKeepRecent     = 12
+	defaultHistoryTokenBudget    = 18000
+	defaultSummaryChunkTokens    = 12000
+	toolOutputPruneProtectTokens = 8000
+	toolOutputPruneMinSavings    = 2000
+	imageAttachmentTokenFloor    = 1500
 )
 
 // ManageHistoryContext 自动压缩历史上下文，提供接近“无限上下文”的滚动体验。
@@ -751,13 +866,16 @@ func ManageHistoryContextWithOptions(history *[]Message, opts ContextManageOptio
 	if EstimateMessagesTokens(*history) <= budget {
 		return false, nil
 	}
-	keepRecent := opts.KeepRecent
-	if keepRecent <= 0 {
-		keepRecent = contextCompactKeepRecent
+	// Cheap local prune first. A failed or cancelled summary must leave the
+	// live history untouched, so the pruned copy is committed only when it
+	// fits or the later summary succeeds.
+	original := append([]Message(nil), (*history)...)
+	pruned := pruneOldToolOutputs(history)
+	if EstimateMessagesTokens(*history) <= budget {
+		return pruned, nil
 	}
-	// Token pressure, not message count, is authoritative. A single packet
-	// capture, log dump or tool result can exceed a local model's whole window.
 	if err := compressHistoryWithOptions(history, opts); err != nil {
+		*history = original
 		return false, err
 	}
 	return true, nil
@@ -793,8 +911,246 @@ func EstimateMessagesTokens(messages []Message) int {
 	total := 0
 	for _, message := range messages {
 		total += 4 + EstimateTextTokens(message.Role) + EstimateTextTokens(message.Content)
+		for _, attachment := range message.Attachments {
+			total += estimateImageAttachmentTokens(attachment)
+		}
 	}
 	return total
+}
+
+// estimateImageAttachmentTokens is a conservative upper bound for a path-backed
+// image. Provider vision billing is much higher than the caption text, so each
+// image has a floor and large files rise with their byte size.
+func estimateImageAttachmentTokens(attachment ImageAttachment) int {
+	tokens := imageAttachmentTokenFloor
+	if attachment.Size > 0 {
+		bySize := int((attachment.Size + 255) / 256)
+		if bySize > tokens {
+			tokens = bySize
+		}
+	}
+	return tokens
+}
+
+// pruneOldToolOutputs replaces tool logs outside the recent protection window
+// with a one-line stub. Real user goals, skill bodies, and the latest desktop
+// screenshot stay intact. The history is left unchanged when the savings are
+// too small to be worth a rewrite.
+func pruneOldToolOutputs(history *[]Message) bool {
+	if history == nil || len(*history) < 2 {
+		return false
+	}
+	current := *history
+	latestShot := latestDesktopShotIndex(current)
+	turnBoundary := recentUserTurnBoundary(current, 2)
+	ordinal := make(map[int]int, len(current))
+	toolN := 0
+	for i := range current {
+		if isPrunableToolOutput(current[i]) {
+			toolN++
+			ordinal[i] = toolN
+		}
+	}
+	protected := 0
+	stubAt := make(map[int]struct{})
+	for i := len(current) - 1; i >= 0; i-- {
+		prunable := isPrunableToolOutput(current[i])
+		if i == latestShot {
+			if prunable {
+				protected += EstimateMessagesTokens(current[i : i+1])
+			}
+			continue
+		}
+		if !prunable {
+			continue
+		}
+		// The last two real user turns stay intact. Older tool logs are kept
+		// only until the recent window is about 8000 tokens, then stubbed.
+		if i >= turnBoundary || protected < toolOutputPruneProtectTokens {
+			protected += EstimateMessagesTokens(current[i : i+1])
+			continue
+		}
+		stubAt[i] = struct{}{}
+	}
+	if len(stubAt) == 0 {
+		return false
+	}
+	next := append([]Message(nil), current...)
+	for i := range next {
+		if _, ok := stubAt[i]; !ok {
+			continue
+		}
+		next[i].Content = toolOutputStub(current[i], ordinal[i])
+		next[i].Attachments = nil
+	}
+	if EstimateMessagesTokens(current)-EstimateMessagesTokens(next) <= toolOutputPruneMinSavings {
+		return false
+	}
+	*history = next
+	return true
+}
+
+// recentUserTurnBoundary is the index of the Nth most recent real user
+// message. Messages from there to the end are the protected turns. Fewer
+// than N real user messages protects the whole history.
+func recentUserTurnBoundary(history []Message, turns int) int {
+	if turns <= 0 {
+		return len(history)
+	}
+	seen := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		if !isRealHistoryUserTurn(history[i]) {
+			continue
+		}
+		seen++
+		if seen >= turns {
+			return i
+		}
+	}
+	return 0
+}
+
+func isRealHistoryUserTurn(message Message) bool {
+	return IsRealUserTurn(message)
+}
+
+// IsRealUserTurn keeps model-facing tool and control feedback out of
+// conversation-turn accounting. Prefixes cover checkpoints written before
+// Synthetic was introduced; new feedback should set Synthetic explicitly.
+func IsRealUserTurn(message Message) bool {
+	if message.Role != "user" {
+		return false
+	}
+	if message.Synthetic {
+		return false
+	}
+	content := strings.TrimSpace(message.Content)
+	if content == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"Output:",
+		"系统警告:",
+		"【系统】",
+		"上一步执行失败:",
+		"用户拒绝执行",
+		"已省略较早的工具输出",
+		"MCP 工具返回了图片证据",
+		"恢复提示：",
+		"循环守卫：",
+	} {
+		if strings.HasPrefix(content, prefix) {
+			return false
+		}
+	}
+	if strings.HasPrefix(content, "子 Agent [") && strings.Contains(content, "] 从 checkpoint 恢复后的结果：") {
+		return false
+	}
+	if content == "子 Agent 不能委派 task，请直接执行。" || content == "请执行具体 action 或 finish 返回结论。" {
+		return false
+	}
+	return true
+}
+
+func isPrunableToolOutput(message Message) bool {
+	if isSkillHistoryMessage(message) {
+		return false
+	}
+	content := strings.TrimSpace(message.Content)
+	if content == "" || strings.HasPrefix(content, "已省略较早的工具输出") {
+		return false
+	}
+	if message.Role == "tool" {
+		return true
+	}
+	if message.Role != "user" {
+		return false
+	}
+	for _, prefix := range []string{"Output:", "上一步执行失败:", "用户拒绝执行"} {
+		if strings.HasPrefix(content, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(content, "已保存为 artifact") || strings.Contains(content, "输出过长已截断")
+}
+
+func isSkillHistoryMessage(message Message) bool {
+	switch strings.ToLower(strings.TrimSpace(message.Name)) {
+	case "skill", "load_skill":
+		return true
+	}
+	return strings.Contains(message.Content, "已加载 Skill") || strings.Contains(message.Content, "【已加载 Skills】")
+}
+
+func latestDesktopShotIndex(history []Message) int {
+	latest := -1
+	for i := range history {
+		for _, attachment := range history[i].Attachments {
+			if isHistoryDesktopShot(attachment.Path) {
+				latest = i
+			}
+		}
+	}
+	return latest
+}
+
+func isHistoryDesktopShot(path string) bool {
+	slash := strings.ReplaceAll(path, "\\", "/")
+	base := slash
+	if i := strings.LastIndex(slash, "/"); i >= 0 {
+		base = slash[i+1:]
+	}
+	lower := strings.ToLower(base)
+	return strings.HasPrefix(base, "screen-") && strings.HasSuffix(lower, ".png") && strings.Contains(slash, "computer-use/")
+}
+
+func toolOutputStub(message Message, step int) string {
+	label := strconv.Itoa(step)
+	if parsed := explicitToolStep(message.Content); parsed != "" {
+		label = parsed
+	} else if name := strings.TrimSpace(message.Name); name != "" {
+		label = name
+	}
+	if path := toolOutputArtifactPath(message.Content); path != "" {
+		return fmt.Sprintf("已省略较早的工具输出（原步骤 %s）。完整内容：%s", label, path)
+	}
+	return fmt.Sprintf("已省略较早的工具输出（原步骤 %s）。", label)
+}
+
+func explicitToolStep(content string) string {
+	const marker = "step="
+	idx := strings.Index(content, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx+len(marker):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func toolOutputArtifactPath(content string) string {
+	const marker = "artifact "
+	idx := strings.LastIndex(content, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx+len(marker):]
+	end := len(rest)
+	for i, r := range rest {
+		switch r {
+		case ' ', '\n', '\r', ',', '，', '。', ')', '）':
+			end = i
+			goto done
+		}
+	}
+done:
+	return strings.TrimSpace(rest[:end])
 }
 
 func compressHistoryWithOptions(history *[]Message, opts ContextManageOptions) error {
@@ -1045,13 +1401,10 @@ func minAnalyzerInt(a, b int) int {
 
 func firstHistoryUserGoal(history []Message) string {
 	for _, message := range history {
-		if message.Role != "user" {
+		if !IsRealUserTurn(message) {
 			continue
 		}
 		content := strings.TrimSpace(message.Content)
-		if content == "" || strings.HasPrefix(content, "Output:") || strings.HasPrefix(content, "上一步执行失败:") {
-			continue
-		}
 		return content
 	}
 	return ""
@@ -1060,13 +1413,10 @@ func firstHistoryUserGoal(history []Message) string {
 func latestHistoryUserDirective(history []Message) string {
 	for i := len(history) - 1; i >= 0; i-- {
 		message := history[i]
-		if message.Role != "user" {
+		if !IsRealUserTurn(message) {
 			continue
 		}
 		content := strings.TrimSpace(message.Content)
-		if content == "" || strings.HasPrefix(content, "Output:") || strings.HasPrefix(content, "上一步执行失败:") {
-			continue
-		}
 		return content
 	}
 	return ""
@@ -1124,10 +1474,89 @@ func cleanJSON(s string) (string, string) {
 	s = strings.TrimSuffix(s, "```")
 	s = strings.TrimSpace(s)
 
-	if strings.Contains(s, `\|`) {
-		s = strings.ReplaceAll(s, `\|`, `\\|`)
-	}
+	// Providers sometimes emit raw shell/Windows path backslashes. A global
+	// replacement damages already-valid JSON, so repair string values only.
+	s = repairModelJSONEscapes(s)
 	return s, prose
+}
+
+func repairModelJSONEscapes(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inString := false
+	stringStart := -1
+	inWindowsPath := false
+	pathValue := false
+	pathSingleQuoted := false
+	pathDoubleQuoted := false
+	for i := 0; i < len(s); {
+		if s[i] == '"' {
+			inString = !inString
+			if inString {
+				stringStart = i + 1
+			}
+			inWindowsPath = false
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if inString && i+2 < len(s) && asciiLetterAt(s, i) && s[i+1] == ':' && s[i+2] == '\\' {
+			inWindowsPath = true
+			pathValue = i == stringStart
+			pathSingleQuoted = i > 0 && s[i-1] == '\''
+			pathDoubleQuoted = i > 0 && s[i-1] == '"' && !pathValue
+		}
+		if inWindowsPath && ((pathSingleQuoted && s[i] == '\'') ||
+			(!pathValue && !pathSingleQuoted && !pathDoubleQuoted && strings.ContainsRune(" \t\r\n;|&><", rune(s[i])))) {
+			inWindowsPath = false
+		}
+		if !inString || s[i] != '\\' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '\\' {
+			j++
+		}
+		run := j - i
+		b.WriteString(s[i:j])
+		closingDoublePath := run%2 == 1 && pathDoubleQuoted && inWindowsPath && j < len(s) && s[j] == '"'
+		if run%2 == 1 && !closingDoublePath && (inWindowsPath || j < len(s) && !validJSONEscapeAt(s, j)) {
+			b.WriteByte('\\')
+		}
+		if run%2 == 1 && (!inWindowsPath || closingDoublePath) && j < len(s) && s[j] == '"' {
+			b.WriteByte('"')
+			j++
+			if closingDoublePath {
+				inWindowsPath = false
+			}
+		}
+		i = j
+	}
+	return b.String()
+}
+
+func validJSONEscapeAt(s string, i int) bool {
+	switch s[i] {
+	case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+		return true
+	case 'u':
+		if i+4 >= len(s) {
+			return false
+		}
+		for _, c := range s[i+1 : i+5] {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // 🟢 [核心新增] extractCommandString 手动扫描字符串，提取 "command": "..." 中的值
@@ -1194,7 +1623,13 @@ func extractCommandString(jsonStr string) (string, bool) {
 			if char == '\\' {
 				inEscape = true
 			} else if char == '"' {
-				// 找到了未转义的结束引号，提取结束！
+				// The surrounding envelope may be malformed even when the command
+				// string is valid JSON. Decode that string once, preserving literal
+				// backslashes while handling Unicode and surrogate pairs correctly.
+				var decoded string
+				if err := json.Unmarshal([]byte(jsonStr[startQuote:i+1]), &decoded); err == nil {
+					return decoded, true
+				}
 				return resultBuilder.String(), true
 			} else {
 				resultBuilder.WriteByte(char)
@@ -1203,28 +1638,6 @@ func extractCommandString(jsonStr string) (string, bool) {
 	}
 
 	return "", false
-}
-
-func decodeJSONUnicodeEscapes(s string) string {
-	if !strings.Contains(s, `\u`) && !strings.Contains(s, `\U`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] != '\\' || i+5 >= len(s) || (s[i+1] != 'u' && s[i+1] != 'U') {
-			b.WriteByte(s[i])
-			continue
-		}
-		hex := s[i+2 : i+6]
-		v, err := strconv.ParseInt(hex, 16, 32)
-		if err != nil {
-			b.WriteByte(s[i])
-			continue
-		}
-		b.WriteRune(rune(v))
-		i += 5
-	}
-	return b.String()
 }
 
 func compressCallLLMContext(ctx context.Context, messages []Message) (string, error) {

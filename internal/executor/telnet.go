@@ -277,8 +277,8 @@ func (t *TelnetExecutor) RunWithStreaming(cmd string, onLine func(string)) (stri
 	if cmd == "" {
 		return "(空命令)", nil
 	}
-	if strings.Contains(cmd, "local_run ") {
-		return (&LocalExecutor{}).RunWithStreaming(strings.ReplaceAll(cmd, "local_run ", ""), onLine)
+	if strings.HasPrefix(cmd, "local_run ") {
+		return (&LocalExecutor{}).RunWithStreaming(strings.TrimPrefix(cmd, "local_run "), onLine)
 	}
 	if CommandUsesSudo(cmd) && t.deviceType == "linux" {
 		cmd = ForceNonInteractiveSudo(cmd)

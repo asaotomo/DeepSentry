@@ -38,6 +38,17 @@ func TestRenderMarkdownReportRendersTableAndInlineStyles(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownReportExpandsEscapedNewlines(t *testing.T) {
+	rendered := renderMarkdownReport(`好，先说结论。\n\n## 授权边界\n- 需要书面授权\n- 不要绕过步骤`, 72)
+	plain := stripANSIForTest(rendered)
+	if strings.Contains(plain, `\n`) {
+		t.Fatalf("escaped newlines still visible:\n%s", plain)
+	}
+	if !strings.Contains(plain, "-- 授权边界") || !strings.Contains(plain, "需要书面授权") {
+		t.Fatalf("report was not laid out:\n%s", plain)
+	}
+}
+
 func TestRenderMarkdownReportFitsWidth(t *testing.T) {
 	md := "| 字段 | 很长的说明 |\n|---|---|\n| 路径 | /var/www/html/uploads/reports/report_YYYYMMDD_HHMMSS.md |"
 	rendered := renderMarkdownReport(md, 48)

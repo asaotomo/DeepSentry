@@ -21,7 +21,14 @@ func isClipboardPasteShortcut(msg tea.KeyMsg) bool {
 
 func pasteShortcutHelp() string {
 	if runtime.GOOS == "darwin" {
-		return "⌘V/Ctrl+V 粘贴图片/文本"
+		return "⌘V 粘贴图片/文本"
 	}
 	return "Ctrl+V 粘贴图片/文本"
+}
+
+func editShortcutHelp() string {
+	if runtime.GOOS == "darwin" {
+		return "⌘A 全选 · ⌘Z 撤销"
+	}
+	return "Ctrl+A 全选 · Ctrl+Z 撤销"
 }

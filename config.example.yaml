@@ -1,13 +1,13 @@
 # DeepSentry 配置示例 — 复制为 config.yaml 后修改
-# 支持 provider: openai | anthropic | google | deepseek | qwen | qianfan | volcengine | hunyuan | tencent_hy | teleai | ctyun | minimax | mimo | glm | xai | grok | ollama | lmstudio | custom
+# 支持 provider: openai | anthropic | google | deepseek | qwen | qianfan | volcengine | hunyuan | tencent_hy | teleai | ctyun | minimax | mimo | glm | xai | grok | ollama | lmstudio | vllm | llamacpp | sglang | localai | custom
 # 支持 api_protocol: auto | openai_chat | anthropic_messages | openai_responses
 
 # 各 provider 的内置预设模型（model_name 留空时自动使用；可随时显式覆盖）:
-#   openai: gpt-6-astra (ChatGPT 6) | anthropic: claude-fable-5-1 | google: gemini-3.8-flash
+#   openai: gpt-6-astra (GPT-6 Astra) | anthropic: claude-opus-5-5 | google: gemini-3.8-flash
 #   deepseek: deepseek-flash | qwen: qwen3.8-max | hunyuan/tencent_hy: hy4-preview
 #   qianfan: qianfan-code-latest | volcengine: ark-code-latest | teleai/ctyun: GLM-5-Pro
-#   minimax: MiniMax-M3 | glm: glm-5.3-flash | mimo Token Plan / MiMo Claw: mimo-v2.5
-#   xai/grok: grok-4.6 | ollama: llama3.3 | lmstudio: local-model
+#   minimax: MiniMax-M3 | glm: glm-5.3-flash | mimo Token Plan / MiMo Claw: mimo-v2.6-pro
+#   xai/grok: grok-4.7 | 本地服务: model_name 使用服务 /v1/models 返回的实际 ID
 
 provider: deepseek
 api_protocol: auto
@@ -41,6 +41,10 @@ terminal_theme: auto                    # auto | dark | light
 #     api_key: none
 #     model_name: qwen3:14b
 #     max_retries: 1
+# 本地推理服务也可设为 primary；Ollama(11434)、LM Studio(1234)、vLLM(8000)、
+# llama.cpp server/LocalAI(8080)、SGLang(30000) 均使用 OpenAI 兼容 /v1/chat/completions。
+# 例如 provider: vllm，api_url: http://127.0.0.1:8000/v1，model_name: 服务返回的模型 ID。
+# 启用鉴权时填写真实 api_key；未启用时可填 none。上下文长度应填服务实际加载值。
 # model_routing:
 #   failover_on: [rate_limit, timeout, server_error, connection, invalid_output]
 
@@ -58,17 +62,17 @@ terminal_theme: auto                    # auto | dark | light
 # 模型能力与上下文适配。auto 会分别处理本地小模型和云端长上下文模型。
 model_profile: auto                 # auto | compact | balanced | full
 model_parameter_b: 0                # 可选：参数量（B）；模型名含 14b/70b 时可自动识别
-context_window_tokens: 0            # 最重要：服务端实际窗口；0=自动/安全默认
+context_window_tokens: 0            # 0=启动时查询 LM Studio/Ollama 已加载实例的实际窗口；其他服务回退安全默认
 context_utilization: 0              # 0=自动；可选 0.40~0.90，为输出和 provider 开销留余量
 reserved_output_tokens: 0           # 0=按窗口自动；也是 API 的输出上限建议值
 native_tool_limit: 0                # 0=按 profile 自动；compact=8, balanced=20, full=全部
-vision_mode: auto                   # auto|enabled|disabled；内置官方模型目录优先，其次按名称保守识别
+vision_mode: auto                   # auto|enabled|disabled；本地视觉模型向导会检测并确认；手动配置时 auto 按目录/名称保守识别
 # auto 已精确识别：deepseek-flash、deepseek-v4-flash-vision-exp、glm-5.3-flash、
-# MiniMax-M3、mimo-v2.5、gpt-6-astra / gpt-6 / chatgpt-6、gpt-5.6、claude-opus-5、
+# MiniMax-M3、mimo-v2.6-pro、gpt-6-astra / gpt-6-sol / gpt-6-luna、grok-4.7、gpt-5.6、claude-opus-5-5、
 # claude-sonnet-5、claude-haiku-4-5、gemini-3.8-flash、qwen3.8-max。
 # 已知纯文本变体不会因同厂商而误开图片；代理/自定义模型无法识别时再显式设 enabled。
-# 例：Gemini 1M 可显式填 1048576。Ollama/LM Studio 必须填实际 num_ctx/max_model_len，
-# 不要只按模型卡的理论上限；未配置的本地服务会先按 32768 安全窗口运行。
+# 例：Gemini 1M 可显式填 1048576。本地服务使用实际加载窗口而非模型卡理论上限；
+# 查询不到运行时窗口时按 32768 安全窗口运行，可显式填写实际 num_ctx/max_model_len。
 
 use_native_tools: true
 # 内置 Go 原生工具支持热插拔：
@@ -77,7 +81,7 @@ use_native_tools: true
 # 常用安全基线白名单示例:
 # enabled_tools: ["read_log", "net_connections", "process_list", "proc_socket_map", "sqlite_inspect", "db_config_audit", "secret_scan"]
 # 对生产环境较敏感的远程探测/传输/转发可禁用:
-# disabled_tools: ["nmap_scan", "packet_capture", "service_fingerprint", "redis_probe", "mysql_probe", "postgres_probe", "oracle_probe", "cidr_scan", "script_run", "file_upload", "archive_extract", "tcp_forward", "socks5_proxy"]
+# disabled_tools: ["nmap_scan", "packet_capture", "service_fingerprint", "redis_probe", "mysql_probe", "postgres_probe", "oracle_probe", "cidr_scan", "script_run", "file_upload", "archive_extract", "tcp_forward", "socks5_proxy", "http_proxy"]
 llm_timeout_sec: 120
 llm_retries: 3
 ssh_command_timeout_sec: 90
@@ -184,7 +188,7 @@ ftp_command_timeout_sec: 30
 ftp_transfer_timeout_sec: 90
 
 # Fleet 多目标运维清单（可选）
-# selector 可使用 name、host、protocol 或 tags，例如 fleet_exec selector=prod,ssh
+# selector 可使用 name、host、protocol 或 tags；逗号取交集，| 取并集，例如 fleet_exec selector=prod,ssh
 # targets:
 #   - name: web-01
 #     protocol: ssh
@@ -221,7 +225,8 @@ ftp_transfer_timeout_sec: 90
 
 # 外部 Skills（可选）
 # 每个来源目录下面放多个 Skill 子目录，每个 Skill 子目录必须包含 SKILL.md。
-# 默认会加载 ./skills 和 ~/.deepsentry/skills；配置 skill_sources 后使用这里声明的目录。
+# 始终加载发布包内置 bundled-skills；默认还加载 ./skills 和 ~/.deepsentry/skills。
+# 配置 skill_sources 后，使用这里声明的目录替代 ./skills。
 # skill_sources:
 #   - "skills"
 #   - "~/.deepsentry/skills"
@@ -275,7 +280,7 @@ ftp_transfer_timeout_sec: 90
 #     required: false
 #     disabled: false
 #
-# HawkEye MCP 1.0.7 深度适配示例（路径换成本机实际位置）：
+# HawkEye MCP 1.0.12 深度适配示例（路径换成本机实际位置）：
 #   - name: hawkeye
 #     type: stdio
 #     command: node

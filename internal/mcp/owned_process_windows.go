@@ -60,35 +60,23 @@ func processCommandLine(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
-	out, err := exec.Command("wmic", "process", "where", "ProcessId="+strconv.Itoa(pid), "get", "CommandLine", "/value").Output()
+	script := "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $p=Get-CimInstance Win32_Process -Filter 'ProcessId=" + strconv.Itoa(pid) + "'; if($p){[Console]::Write($p.CommandLine)}"
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if value, ok := strings.CutPrefix(line, "CommandLine="); ok {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return strings.TrimSpace(string(out))
 }
 
 func processPPID(pid int) int {
 	if pid <= 0 {
 		return 0
 	}
-	out, err := exec.Command("wmic", "process", "where", "ProcessId="+strconv.Itoa(pid), "get", "ParentProcessId", "/value").Output()
+	script := "$p=Get-CimInstance Win32_Process -Filter 'ProcessId=" + strconv.Itoa(pid) + "'; if($p){[Console]::Write($p.ParentProcessId)}"
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if value, ok := strings.CutPrefix(line, "ParentProcessId="); ok {
-			ppid, convErr := strconv.Atoi(strings.TrimSpace(value))
-			if convErr == nil {
-				return ppid
-			}
-		}
-	}
-	return 0
+	ppid, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	return ppid
 }

@@ -95,6 +95,7 @@ func (s *Service) runWeixin(ctx context.Context, c config.ChatChannel, update fu
 	}
 }
 func (s *Service) sendWeixin(ctx context.Context, c config.ChatChannel, m Message, text string) error {
+	m = s.latestReplyContext(c, m)
 	if m.ContextToken == "" {
 		return errors.New("缺少微信回复上下文，请用户重新发消息")
 	}

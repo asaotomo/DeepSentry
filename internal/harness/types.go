@@ -60,6 +60,8 @@ type AgentAction struct {
 	NewString   string `json:"new_string"`
 	ReplaceAll  bool   `json:"replace_all"`
 	GlobPattern string `json:"glob_pattern"`
+	Offset      int    `json:"offset,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 
 	// todo
 	Todos []TodoItem `json:"todos"`

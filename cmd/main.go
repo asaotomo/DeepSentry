@@ -23,6 +23,7 @@ import (
 	"ai-edr/internal/chat"
 	"ai-edr/internal/collector"
 	"ai-edr/internal/config"
+	"ai-edr/internal/desktop"
 	"ai-edr/internal/executor"
 	"ai-edr/internal/harness"
 	"ai-edr/internal/harness/subagent"
@@ -86,11 +87,15 @@ func runCLI() (exitCode int) {
 	chatSetup := flag.Bool("chat-setup", false, "打开通讯工具连接窗口（飞书/QQ/微信/企微扫码，钉钉手动配置）")
 	chatStop := flag.Bool("chat-stop", false, "停止仍在运行的聊天服务")
 	schedulerMode := flag.Bool("scheduler", false, "仅运行本地定时任务调度器")
+	computerCheck := flag.Bool("computer-check", false, "检查本机桌面操作依赖和权限，不发送输入")
 	showVersion := flag.Bool("version", false, "显示版本")
 	showHelp := flag.Bool("h", false, "显示帮助")
 	showHelpLong := flag.Bool("help", false, "显示帮助")
 	flag.Usage = printUsage
 	flag.Parse()
+	if *computerCheck {
+		return runComputerCheck()
+	}
 	if os.Getenv("DEEPSENTRY_WEBSHELL_SUPERVISOR") == "1" {
 		return runWebShellSupervisor()
 	}
@@ -118,6 +123,9 @@ func runCLI() (exitCode int) {
 	if *inspectRun || *schedulerMode || *chatMode || *chatSetup || *chatSetupCLI || *chatStop {
 		*noTUI = true
 		*quiet = true
+	}
+	if os.Getenv("DEEPSENTRY_NO_VT") == "1" {
+		*noTUI = true
 	}
 	if *noTUI {
 		*tuiMode = false
@@ -222,6 +230,7 @@ func runCLI() (exitCode int) {
 			ui.Exit(1)
 		}
 		fmt.Println(ui.Prefix("⚠️", "[WARN]") + "未检测到配置文件或请求重新初始化，进入向导模式...")
+		ui.DisableMouseTracking()
 		if err := runElegantWizard(); err != nil {
 			fmt.Printf("%s向导中断: %v\n", ui.Prefix("❌", "[ERR]"), err)
 			ui.Exit(1)
@@ -244,6 +253,12 @@ func runCLI() (exitCode int) {
 		// Command-line proxy is process-scoped and deliberately does not rewrite
 		// config.yaml. Detached WebShell children receive the original args.
 		config.GlobalConfig.ControllerProxy = startupProxy
+	}
+	if config.IsLocalProvider(config.GlobalConfig.Provider) &&
+		(config.GlobalConfig.ContextWindowTokens <= 0 || !config.GlobalConfig.UseNativeTools) {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		_, _ = config.ApplyLocalRuntimeContext(ctx, &config.GlobalConfig)
+		cancel()
 	}
 
 	if *inspectRun {
@@ -734,6 +749,7 @@ func runCLI() (exitCode int) {
 	}
 
 	var confirmationMu sync.Mutex
+	var confirmStop <-chan struct{}
 	sessionApprovals := make(map[string]string)
 	allowAllChatSession := false
 	confirmFn := func(action *harness.AgentAction) bool {
@@ -754,13 +770,17 @@ func runCLI() (exitCode int) {
 			if strings.TrimSpace(action.ToolName) == "" {
 				summary = string(action.Type)
 			}
-			_ = chat.WriteConfirmRequest(dir, chat.ConfirmRequest{
+			if err := chat.WriteConfirmRequest(dir, chat.ConfirmRequest{
 				Summary:    strings.TrimSpace(summary),
+				Command:    harness.ConfirmPreview(action),
 				Reason:     strings.TrimSpace(action.Reason),
 				ScopeKey:   scopeKey,
 				ScopeLabel: scopeLabel,
-			})
-			reply, ok := chat.WaitConfirmReply(dir, nil, 10*time.Minute)
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, "无法把确认请求发到聊天，已拒绝本次高危操作；请检查 chat.store 目录是否可写。")
+				return false
+			}
+			reply, ok := chat.WaitConfirmReply(dir, confirmStop, 10*time.Minute)
 			if !ok || reply.Decision == "deny" {
 				return false
 			}
@@ -775,6 +795,10 @@ func runCLI() (exitCode int) {
 		if nonInteractive {
 			// A one-shot process has no reliable confirmation channel.  Batch -y
 			// bypasses this callback; all other high-risk actions fail closed.
+			if action.ToolName == "computer_use" {
+				fmt.Fprintln(os.Stderr, ui.Prefix("🚫", "[DENY]")+"无人值守任务不会操作本机鼠标键盘。请在前台会话里执行；确需无人值守操作桌面时，另设 DEEPSENTRY_COMPUTER_USE_UNATTENDED=1。")
+				return false
+			}
 			fmt.Fprintln(os.Stderr, ui.Prefix("🚫", "[DENY]")+"非交互任务已拒绝需要人工确认的操作；如已授权无人值守执行，请显式使用 --batch -y。")
 			return false
 		}
@@ -927,6 +951,7 @@ func runCLI() (exitCode int) {
 	runCtx, stopRunSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopRunSignals()
 	loopCfg.Stop = runCtx.Done()
+	confirmStop = loopCfg.Stop
 	runResult := agent.RunLoop(loopCfg)
 	if !*jsonOutput && !*quiet {
 		fmt.Printf("%s任务结束: status=%s step=%d reason=%s\n", ui.Prefix("⏹️", "[DONE]"), runResult.Status, runResult.Step, runResult.Reason)
@@ -1087,6 +1112,31 @@ func launchDetachedWebShell(title string) (string, string, string, string, error
 	}
 	_ = progressFile.Close()
 	return reportPath, progressPath, statusPath, latestPath, nil
+}
+
+func runComputerCheck() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	response := desktop.Default.SelfCheck(ctx)
+	ready := response.OK && response.State != nil && response.State.Ready
+	if !ready && runtime.GOOS == "darwin" && response.State != nil && response.Category != "capture_failed" {
+		if err := desktop.RequestPermissions(ctx); err == nil {
+			fmt.Fprintln(os.Stderr, "已请求 macOS 授权。请在「系统设置 → 隐私与安全性」里给 computer-use-helper 打开「辅助功能」和「屏幕录制」，然后重新运行 --computer-check。更换新版 helper 后需要重新授权。")
+		}
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(response)
+	switch {
+	case ready:
+		fmt.Fprintln(os.Stderr, "桌面操作可用：状态正常，已实际截图一次并删除测试图。")
+		return 0
+	case response.Category == "capture_failed":
+		fmt.Fprintln(os.Stderr, "权限显示已开启，但实际截图失败："+response.Error)
+	case response.State != nil && response.State.Reason != "":
+		fmt.Fprintln(os.Stderr, "桌面操作暂不可用："+response.State.Reason)
+	case response.Error != "":
+		fmt.Fprintln(os.Stderr, "桌面操作暂不可用："+response.Error)
+	}
+	return 1
 }
 
 func runWebShellSupervisor() int {
@@ -1956,7 +2006,7 @@ func resumeUserSupplement(taskFlag, taskShort string, args []string) string {
 	return ""
 }
 
-const contextWindowAutoChoice = "自动（推荐，按服务商/模型名推断）"
+const contextWindowAutoChoice = "自动（推荐，优先读取本地运行时）"
 const contextWindowCustomChoice = "自定义"
 
 var contextWindowChoices = []string{
@@ -2011,7 +2061,24 @@ func validateCustomContextWindow(value interface{}) error {
 	return nil
 }
 
-var wizardProviderOrder = []string{"deepseek", "qwen", "qianfan", "volcengine", "teleai", "hunyuan", "openai", "anthropic", "google", "minimax", "glm", "mimo", "xai", "ollama", "lmstudio"}
+var wizardProviderOrder = []string{"deepseek", "qwen", "qianfan", "volcengine", "teleai", "hunyuan", "openai", "anthropic", "google", "minimax", "glm", "mimo", "xai", "ollama", "lmstudio", "vllm", "llamacpp", "sglang", "localai"}
+
+const (
+	localVisionChoiceAuto     = "自动识别（无法确认时关闭图片）"
+	localVisionChoiceEnabled  = "支持图片理解"
+	localVisionChoiceDisabled = "仅支持文本"
+)
+
+func localVisionMode(choice string) string {
+	switch choice {
+	case localVisionChoiceEnabled:
+		return "enabled"
+	case localVisionChoiceDisabled:
+		return "disabled"
+	default:
+		return "auto"
+	}
+}
 
 func wizardProviderLabel(id string) string {
 	p, ok := config.FindProvider(id)
@@ -2025,8 +2092,8 @@ func wizardProviderLabel(id string) string {
 	if id == "deepseek" {
 		detail += " · 推荐"
 	}
-	if id == "ollama" || id == "lmstudio" {
-		detail = "选择本机已加载模型"
+	if config.IsLocalProvider(id) {
+		detail = "选择服务可用模型 · 检测图片能力"
 	}
 	return p.DisplayName + " (" + detail + ")"
 }
@@ -2049,10 +2116,14 @@ func wizardProviderID(label string) string {
 	return "custom"
 }
 
-func wizardModelSuggestions(provider string) func(string) []string {
+func wizardModelSuggestions(provider string, discovered ...string) func(string) []string {
 	return func(query string) []string {
 		var ids []string
-		for _, id := range config.ProviderModelSuggestions(provider) {
+		candidates := discovered
+		if len(candidates) == 0 {
+			candidates = config.ProviderModelSuggestions(provider)
+		}
+		for _, id := range candidates {
 			if strings.Contains(strings.ToLower(id), strings.ToLower(strings.TrimSpace(query))) {
 				ids = append(ids, id)
 			}
@@ -2127,9 +2198,9 @@ func runElegantWizard() error {
 	case "deepseek":
 		urlHelp = "DeepSeek 官方 OpenAI 兼容 Base URL；默认 deepseek-flash（产品名 V4.1 Flash）原生多模态，可接收图片与 MCP 截图回灌"
 	case "openai":
-		urlHelp = "OpenAI 官方 Base URL；默认 gpt-6-astra + Responses API。可手动指定其他模型及兼容协议"
+		urlHelp = "OpenAI 官方 Base URL；默认 GPT-6 Astra (gpt-6-astra)，可选 GPT-6 Sol/Luna，走 Responses API"
 	case "anthropic":
-		urlHelp = "Anthropic 官方 Messages API Base URL；默认 claude-fable-5-1；可选 claude-opus-5 或 claude-sonnet-5"
+		urlHelp = "Anthropic 官方 Messages API Base URL；默认 claude-opus-5-5；高难度任务可选 claude-fable-5-1"
 	case "google":
 		urlHelp = "Gemini 官方 OpenAI 兼容 Base URL；默认 gemini-3.8-flash"
 	case "qwen":
@@ -2147,17 +2218,68 @@ func runElegantWizard() error {
 	case "teleai":
 		urlHelp = "电信星辰/TokenHub OpenAI 兼容 Base URL；如控制台分配了专属 endpoint，请覆盖此值"
 	case "mimo":
-		urlHelp = "MiMo Token Plan 中国站 OpenAI 兼容 Base URL；MiMo Claw/Agent 场景共用该套餐接口"
+		urlHelp = "MiMo Token Plan 中国站 OpenAI 兼容 Base URL；默认 mimo-v2.6-pro，更快可选 mimo-v2.6-flash 或 mimo-v2.6-pro-ultraspeed"
+	case "xai":
+		urlHelp = "xAI 官方 OpenAI 兼容 Base URL；默认 Grok 4.7，模型 ID 为 grok-4.7"
 	case "lmstudio":
-		urlHelp = "LM Studio 默认端口 1234"
+		urlHelp = "LM Studio 本地服务默认端口 1234；请先在 LM Studio 中启动服务并加载模型"
+	case "vllm":
+		urlHelp = "vLLM OpenAI 兼容服务默认端口 8000；如配置了 --api-key，请填写密钥"
+	case "llamacpp":
+		urlHelp = "llama.cpp 的 llama-server 默认端口 8080；模型 ID 以 /v1/models 返回值为准"
+	case "sglang":
+		urlHelp = "SGLang OpenAI 兼容服务默认端口 30000"
+	case "localai":
+		urlHelp = "LocalAI OpenAI 兼容服务默认端口 8080"
 	}
 
 	if preset, ok := config.FindProvider(providerID); ok && defaultURL == "" {
 		defaultURL = preset.APIURL
 		defaultModel = preset.Model
 		if providerID == "ollama" {
-			urlHelp = "Ollama OpenAI 兼容端点"
+			urlHelp = "Ollama OpenAI 兼容端点，默认端口 11434；请先 pull 模型并启动服务"
 		}
+	}
+	localProvider := config.IsLocalProvider(providerID)
+	var localURL, localKey string
+	var localModels []string
+	if localProvider {
+		// Historical Ollama/LM Studio presets are kept for existing config files,
+		// but a new setup must select a model that this server actually exposes.
+		defaultModel = ""
+		if err := askOne(&survey.Input{
+			Message: ui.Prefix("🌐", "[URL]") + "本地模型 API 地址:",
+			Default: defaultURL,
+			Help:    urlHelp,
+		}, &localURL, survey.WithValidator(func(value interface{}) error {
+			_, err := config.LocalModelsURL(fmt.Sprint(value))
+			return err
+		})); err != nil {
+			return err
+		}
+		if err := askOne(&survey.Password{
+			Message: ui.Prefix("🔑", "[KEY]") + "API Key (未启用鉴权可回车跳过):",
+			Help:    "vLLM 等服务如启用了 API Key，请填写；否则留空",
+		}, &localKey); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		discovered, discoverErr := config.DiscoverLocalModels(ctx, localURL, localKey)
+		cancel()
+		if discoverErr != nil {
+			fmt.Printf("%s无法读取模型列表（%v）；请手动填写服务实际加载的 Model ID。\n", ui.Prefix("⚠️", "[WARN]"), discoverErr)
+			defaultModel = ""
+		} else {
+			localModels = discovered
+			if len(localModels) == 1 {
+				defaultModel = localModels[0]
+			}
+			fmt.Printf("%s发现 %d 个可用模型；下一步按 Tab 查看候选并选择 Model ID。\n", ui.Prefix("✅", "[OK]"), len(localModels))
+		}
+	}
+	contextDefault := contextWindowDefaultChoice(viper.GetInt("context_window_tokens"))
+	if localProvider && !config.IsLocalProvider(viper.GetString("provider")) {
+		contextDefault = contextWindowAutoChoice
 	}
 
 	// 3. 构建核心配置问题 (带动态默认值)
@@ -2185,8 +2307,8 @@ func runElegantWizard() error {
 			Prompt: &survey.Input{
 				Message: ui.Prefix("🧠", "[MODEL]") + "模型名称 (Model ID):",
 				Default: defaultModel,
-				Suggest: wizardModelSuggestions(providerID),
-				Help:    "按 Tab 查看本提供商模型；也可直接输入控制台允许的 Model ID。本地服务请填写已加载模型名称",
+				Suggest: wizardModelSuggestions(providerID, localModels...),
+				Help:    "按 Tab 查看本提供商模型；也可直接输入控制台允许的 Model ID。本地服务请填写实际可用的模型 ID",
 			},
 			Validate: survey.Required,
 		},
@@ -2195,15 +2317,15 @@ func runElegantWizard() error {
 			Prompt: &survey.Select{
 				Message: ui.Prefix("📏", "[CTX]") + "模型/服务端实际上下文长度:",
 				Options: contextWindowChoices,
-				Default: contextWindowDefaultChoice(viper.GetInt("context_window_tokens")),
-				Help:    "应填 API 或本地运行时的实际限制，不确定时选自动；Ollama/LM Studio 需与 num_ctx/max_model_len 一致",
+				Default: contextDefault,
+				Help:    "应填 API 或本地运行时的实际限制，不确定时选自动；本地服务需与实际 num_ctx/max_model_len 等设置一致",
 			},
 		},
 		{
 			Name: "api_key",
 			Prompt: &survey.Password{
 				Message: ui.Prefix("🔑", "[KEY]") + "API Key (本地模型可回车跳过):",
-				Help:    "OpenAI/DeepSeek 必填；Ollama/LM Studio 可直接回车留空",
+				Help:    "云端 API 一般必填；本地服务如果启用了鉴权，也应填写对应密钥",
 			},
 		},
 		// 🟢 1. 在向导中增加最大轮数配置
@@ -2224,7 +2346,16 @@ func runElegantWizard() error {
 			},
 		},
 	}
-	if providerID == "ollama" || providerID == "lmstudio" {
+	if localProvider {
+		// The local endpoint/key were collected before querying /v1/models.
+		// Do not ask them again alongside the remaining questions.
+		filtered := qs[:0]
+		for _, q := range qs {
+			if q.Name != "api_url" && q.Name != "api_key" {
+				filtered = append(filtered, q)
+			}
+		}
+		qs = filtered
 		qs = append(qs,
 			&survey.Question{
 				Name: "model_parameter_b",
@@ -2260,6 +2391,20 @@ func runElegantWizard() error {
 	if err != nil {
 		return err
 	}
+	if localProvider {
+		answers.ApiUrl = localURL
+		answers.ApiKey = localKey
+	}
+	localRuntime := config.LocalModelRuntimeInfo{}
+	if localProvider {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		var runtimeErr error
+		localRuntime, runtimeErr = config.DiscoverLocalModelRuntime(ctx, providerID, answers.ApiUrl, answers.ApiKey, answers.ModelName)
+		cancel()
+		if runtimeErr != nil {
+			fmt.Printf("%s未能读取运行时配置（%v）；将使用手动选择或保守默认值。\n", ui.Prefix("⚠️", "[WARN]"), runtimeErr)
+		}
+	}
 	contextWindowTokens, knownChoice := contextWindowTokensFromChoice(answers.ContextChoice)
 	if !knownChoice {
 		customDefault := viper.GetInt("context_window_tokens")
@@ -2276,9 +2421,56 @@ func runElegantWizard() error {
 		}
 		contextWindowTokens, _ = strconv.Atoi(strings.TrimSpace(customValue))
 	}
+	if localProvider && contextWindowTokens == 0 && localRuntime.ContextWindowTokens > 0 {
+		contextWindowTokens = localRuntime.ContextWindowTokens
+		fmt.Printf("%s使用当前已加载实例的上下文窗口：%d tokens。\n", ui.Prefix("✅", "[OK]"), contextWindowTokens)
+	}
 
 	if answers.ApiKey == "" {
 		answers.ApiKey = "none"
+	}
+	visionMode := "auto"
+	localNativeTools := false
+	if localProvider {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		vision, visionErr := config.DiscoverLocalModelVision(ctx, providerID, answers.ApiUrl, answers.ApiKey, answers.ModelName)
+		cancel()
+		visionDefault := localVisionChoiceAuto
+		switch {
+		case visionErr != nil:
+			fmt.Printf("%s无法读取该模型的图片能力（%v）；可根据已加载模型和服务配置手动选择。\n", ui.Prefix("⚠️", "[WARN]"), visionErr)
+		case vision.Known && vision.Supported:
+			visionDefault = localVisionChoiceEnabled
+			fmt.Printf("%s本地服务报告模型 %q 支持图片理解。\n", ui.Prefix("✅", "[OK]"), answers.ModelName)
+		case vision.Known:
+			visionDefault = localVisionChoiceDisabled
+			fmt.Printf("%s本地服务报告模型 %q 不支持图片理解。\n", ui.Prefix("ℹ️", "[INFO]"), answers.ModelName)
+		default:
+			fmt.Printf("%s本地服务没有提供模型 %q 的明确图片能力信息；请按实际模型与服务配置选择。\n", ui.Prefix("ℹ️", "[INFO]"), answers.ModelName)
+		}
+		visionChoice := visionDefault
+		if err := askOne(&survey.Select{
+			Message: ui.Prefix("🖼️", "[VISION]") + "当前本地模型能否理解图片:",
+			Options: []string{localVisionChoiceAuto, localVisionChoiceEnabled, localVisionChoiceDisabled},
+			Default: visionDefault,
+			Help:    "以当前加载的模型及服务端多模态配置为准；自动模式无法确认时会关闭图片输入。",
+		}, &visionChoice); err != nil {
+			return err
+		}
+		visionMode = localVisionMode(visionChoice)
+		nativeDefault := localRuntime.NativeToolsKnown && localRuntime.NativeToolsSupported &&
+			(answers.Protocol == "auto" || answers.Protocol == "openai_chat")
+		if localRuntime.NativeToolsKnown {
+			fmt.Printf("%s模型工具调用能力：%s。\n", ui.Prefix("🛠️", "[TOOLS]"), map[bool]string{true: "支持", false: "未报告支持"}[localRuntime.NativeToolsSupported])
+		}
+		localNativeTools = nativeDefault
+		if err := askOne(&survey.Confirm{
+			Message: ui.Prefix("🛠️", "[TOOLS]") + "启用原生工具调用（提高本地 Agent 执行动作的可靠性）?",
+			Default: nativeDefault,
+			Help:    "仅当模型和本地服务都支持 OpenAI 工具调用时启用；不支持时可关闭，使用 JSON 兼容路径。",
+		}, &localNativeTools); err != nil {
+			return err
+		}
 	}
 
 	// 4. 保存配置
@@ -2289,8 +2481,12 @@ func runElegantWizard() error {
 	viper.Set("api_key", answers.ApiKey)
 	viper.Set("model_profile", "auto")
 	viper.Set("context_window_tokens", contextWindowTokens)
-	viper.Set("vision_mode", "auto")
-	if providerID == "ollama" || providerID == "lmstudio" {
+	viper.Set("vision_mode", visionMode)
+	if preset, ok := config.FindProvider(providerID); ok {
+		viper.Set("use_native_tools", preset.NativeTools)
+	}
+	if localProvider {
+		viper.Set("use_native_tools", localNativeTools)
 		viper.Set("model_parameter_b", answers.ModelParameterB)
 	}
 	// 🟢 2. 保存最大轮数 (Viper 会自动处理类型，这里存为字符串或数字均可被 GetInt 读取)

@@ -54,7 +54,7 @@ func PortListen(rt Runtime) (string, error) {
 // RouteTable 路由表（/proc/net/route）
 func RouteTable(rt Runtime) (string, error) {
 	if rt.IsWindows {
-		return "", fmt.Errorf("当前 Windows 路由表暂未 Go 原生实现，请使用 execute route print")
+		return windowsSystemCommand(rt, "route print", "Windows 路由表", 12000)
 	}
 	data, err := readTarget("/proc/net/route")
 	if err != nil {
@@ -77,7 +77,7 @@ func RouteTable(rt Runtime) (string, error) {
 // ARPTable ARP 缓存（/proc/net/arp）
 func ARPTable(rt Runtime) (string, error) {
 	if rt.IsWindows {
-		return "", fmt.Errorf("当前 Windows ARP 暂未 Go 原生实现")
+		return windowsSystemCommand(rt, "arp -a", "Windows ARP 表", 12000)
 	}
 	data, err := readTarget("/proc/net/arp")
 	if err != nil {
@@ -99,7 +99,7 @@ func ARPTable(rt Runtime) (string, error) {
 // MemInfo 内存信息（/proc/meminfo）
 func MemInfo(rt Runtime) (string, error) {
 	if rt.IsWindows {
-		return "", fmt.Errorf("当前 Windows 请使用 execute wmic OS get FreePhysicalMemory")
+		return windowsSystemCommand(rt, windowsPowerShellCommand(`Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory`), "Windows 内存信息", 4000)
 	}
 	data, err := readTarget("/proc/meminfo")
 	if err != nil {
@@ -177,4 +177,12 @@ func FileHash(rt Runtime, path string) (string, error) {
 	}
 	sum := sha256Sum(data)
 	return fmt.Sprintf("%s 文件哈希\n路径: %s\nSHA256: %s\n大小: %d 字节", rt.tag(), strings.TrimSpace(path), sum, len(data)), nil
+}
+
+func windowsSystemCommand(rt Runtime, command, label string, limit int) (string, error) {
+	if rt.Exec == nil {
+		return "", fmt.Errorf("执行器未初始化")
+	}
+	out, err := rt.Exec.Run(command)
+	return fmt.Sprintf("%s %s\n%s", rt.tag(), label, truncate(out, limit)), err
 }

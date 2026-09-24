@@ -62,7 +62,7 @@ func TestApplyProviderDefaultsLatestChineseVisionModels(t *testing.T) {
 		{"deepseek", "deepseek-flash", "https://api.deepseek.com/chat/completions"},
 		{"glm", "glm-5.3-flash", "https://open.bigmodel.cn/api/paas/v4/chat/completions"},
 		{"minimax", "MiniMax-M3", "https://api.minimax.cn/v1/chat/completions"},
-		{"mimo", "mimo-v2.5", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"},
+		{"mimo", "mimo-v2.6-pro", "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"},
 	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
@@ -136,11 +136,14 @@ func TestFindModelPresetPreservesTextOnlyVariants(t *testing.T) {
 		{"mimo", "mimo-v2.5-pro", false, 1_000_000},
 		{"custom", "GLM-5.3-FLASH", true, 1_000_000},
 		{"openai", "gpt-6-astra", true, 1_050_000},
+		{"openai", "gpt-6-sol", true, 1_050_000},
+		{"openai", "gpt-6-luna", true, 1_050_000},
 		{"openai", "gpt-6", true, 1_050_000},
 		{"custom", "chatgpt6", true, 1_050_000},
 		{"deepseek", "deepseek-flash", true, 1_000_000},
 		{"deepseek", "deepseek-v4.1-flash", true, 1_000_000},
 		{"openai", "gpt-5.6", true, 1_050_000},
+		{"anthropic", "claude-opus-5-5", true, 1_000_000},
 		{"anthropic", "claude-opus-5", true, 1_000_000},
 		{"anthropic", "claude-sonnet-5", true, 1_000_000},
 		{"anthropic", "claude-haiku-4-5", true, 200_000},
@@ -148,6 +151,7 @@ func TestFindModelPresetPreservesTextOnlyVariants(t *testing.T) {
 		{"qwen", "qwen3.8-max", true, 1_000_000},
 		{"qwen", "qwen3.7-plus", true, 1_000_000},
 		{"tencent_hy", "hy4-preview", false, 1_000_000},
+		{"grok", "grok-4.7", true, 500_000},
 		{"grok", "grok-4.6", true, 500_000},
 		{"xai", "grok-4.3", true, 1_000_000},
 	} {
@@ -166,11 +170,11 @@ func TestProviderDefaultsOfficialLatestModels(t *testing.T) {
 		protocol string
 	}{
 		{"openai", "gpt-6-astra", "api.openai.com/v1", ProtocolOpenAIResponses},
-		{"anthropic", "claude-fable-5-1", "api.anthropic.com/v1", ProtocolAnthropicMessages},
+		{"anthropic", "claude-opus-5-5", "api.anthropic.com/v1", ProtocolAnthropicMessages},
 		{"google", "gemini-3.8-flash", "generativelanguage.googleapis.com/v1beta/openai", ProtocolOpenAIChat},
 		{"qwen", "qwen3.8-max", "dashscope.aliyuncs.com/compatible-mode/v1", ProtocolOpenAIChat},
 		{"hunyuan", "hy4-preview", "tokenhub.tencentmaas.com/v1", ProtocolOpenAIChat},
-		{"xai", "grok-4.6", "api.x.ai/v1", ProtocolOpenAIChat},
+		{"xai", "grok-4.7", "api.x.ai/v1", ProtocolOpenAIChat},
 	}
 	for _, test := range tests {
 		cfg := &Config{Provider: test.provider}
@@ -184,7 +188,7 @@ func TestProviderDefaultsOfficialLatestModels(t *testing.T) {
 func TestProviderDefaultsXAIAndLMStudio(t *testing.T) {
 	xai := &Config{Provider: "xai"}
 	ApplyProviderDefaults(xai)
-	if xai.ModelName != "grok-4.6" || !contains(xai.ApiURL, "api.x.ai") || xai.APIProtocol != ProtocolOpenAIChat {
+	if xai.ModelName != "grok-4.7" || !contains(xai.ApiURL, "api.x.ai") || xai.APIProtocol != ProtocolOpenAIChat {
 		t.Fatalf("unexpected xai defaults: %+v", xai)
 	}
 
@@ -192,6 +196,37 @@ func TestProviderDefaultsXAIAndLMStudio(t *testing.T) {
 	ApplyProviderDefaults(lm)
 	if !contains(lm.ApiURL, "localhost:1234") || lm.APIProtocol != ProtocolOpenAIChat {
 		t.Fatalf("unexpected lmstudio defaults: %+v", lm)
+	}
+}
+
+func TestLocalProviderPresetsAndExplicitModelIDs(t *testing.T) {
+	for provider, base := range map[string]string{
+		"ollama": "localhost:11434", "lmstudio": "localhost:1234",
+		"vllm": "localhost:8000", "llamacpp": "localhost:8080",
+		"sglang": "localhost:30000", "localai": "localhost:8080",
+	} {
+		cfg := &Config{Provider: provider, ModelName: "my-served-model"}
+		ApplyProviderDefaults(cfg)
+		if !IsLocalProvider(provider) || !contains(cfg.ApiURL, base) ||
+			cfg.APIProtocol != ProtocolOpenAIChat || cfg.ModelName != "my-served-model" {
+			t.Fatalf("%s unexpected local defaults: %+v", provider, cfg)
+		}
+		if !cfg.IsLocalModelEndpoint() || cfg.EffectiveModelCapabilities().ContextWindowTokens != 32_768 {
+			t.Fatalf("%s lost conservative local model adaptation", provider)
+		}
+		if len(ProviderModelSuggestions(provider)) != 0 {
+			t.Fatalf("%s should discover the actual served model IDs", provider)
+		}
+	}
+}
+
+func TestLocalProviderBareHostGetsOpenAIV1Path(t *testing.T) {
+	for _, provider := range []string{"ollama", "lmstudio", "vllm", "llamacpp", "sglang", "localai"} {
+		cfg := &Config{Provider: provider, ApiURL: "http://127.0.0.1:12345", ModelName: "served-model"}
+		ApplyProviderDefaults(cfg)
+		if cfg.ApiURL != "http://127.0.0.1:12345/v1/chat/completions" {
+			t.Fatalf("%s bare-host API URL=%q", provider, cfg.ApiURL)
+		}
 	}
 }
 
@@ -260,13 +295,25 @@ func TestProtocolEndpointRouting(t *testing.T) {
 	}
 }
 func TestModelSuggestionsExcludeRetiredAndUnverifiedIDs(t *testing.T) {
-	for _, id := range ProviderModelSuggestions("openai") {
-		if id == "chatgpt6" || id == "gpt-6-sol" {
+	openai := ProviderModelSuggestions("openai")
+	if len(openai) < 3 || openai[0] != "gpt-6-astra" || openai[1] != "gpt-6-sol" || openai[2] != "gpt-6-luna" {
+		t.Fatalf("openai suggestions=%v", openai)
+	}
+	for _, id := range openai {
+		if id == "chatgpt6" || id == "gpt-6-terra" {
 			t.Fatal(id)
 		}
 	}
+	mimo := ProviderModelSuggestions("mimo")
+	if len(mimo) == 0 || mimo[0] != "mimo-v2.6-pro" {
+		t.Fatalf("mimo suggestions=%v", mimo)
+	}
+	xai := ProviderModelSuggestions("xai")
+	if len(xai) == 0 || xai[0] != "grok-4.7" {
+		t.Fatalf("xai suggestions=%v", xai)
+	}
 	ids := ProviderModelSuggestions("anthropic")
-	if len(ids) < 2 || ids[0] != "claude-fable-5-1" {
+	if len(ids) < 4 || ids[0] != "claude-opus-5-5" || ids[1] != "claude-fable-5-1" {
 		t.Fatal(ids)
 	}
 	for _, id := range ProviderModelSuggestions("deepseek") {

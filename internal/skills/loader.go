@@ -40,14 +40,15 @@ type SkillCatalog struct {
 // 例外：DeepSentry 内置的 FofaMap MCP playbook 不会被市场里带
 // scripts/fofa_recon.py 的同名 Skill 覆盖。
 func LoadCatalog(sources []string) (*SkillCatalog, error) {
-	catalog := &SkillCatalog{Sources: append([]string(nil), sources...)}
+	catalog := &SkillCatalog{}
 	seen := make(map[string]int)
 
-	for _, src := range sources {
+	for _, rawSource := range sources {
+		src := normalizeSkillSource(rawSource)
 		if src == "" {
 			continue
 		}
-		src = expandSourcePath(src)
+		catalog.Sources = append(catalog.Sources, src)
 		entries, err := os.ReadDir(src)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -71,13 +72,14 @@ func LoadCatalog(sources []string) (*SkillCatalog, error) {
 				continue
 			}
 
-			if idx, exists := seen[meta.Name]; exists {
+			key := strings.ToLower(meta.Name)
+			if idx, exists := seen[key]; exists {
 				if keepMCPAdapterSkill(catalog.Skills[idx], meta) {
 					continue
 				}
 				catalog.Skills[idx] = meta
 			} else {
-				seen[meta.Name] = len(catalog.Skills)
+				seen[key] = len(catalog.Skills)
 				catalog.Skills = append(catalog.Skills, meta)
 			}
 		}
@@ -94,29 +96,29 @@ func LoadCatalog(sources []string) (*SkillCatalog, error) {
 // persistent and discoverable even when the project also declares custom
 // roots. Users can still explicitly disable it.
 func ResolveSources(configured, disabled []string) []string {
-	sources := append([]string(nil), configured...)
-	if len(sources) == 0 {
-		sources = DefaultSources()
+	sources := executableSkillSources()
+	if len(configured) == 0 {
+		sources = append(sources, "skills")
 	} else {
-		sources = append(sources, defaultManagedSkillDir())
+		sources = append(sources, configured...)
 	}
+	sources = append(sources, defaultManagedSkillDir())
 	blocked := make(map[string]bool, len(disabled))
 	for _, rawValue := range disabled {
-		rawValue = strings.TrimSpace(rawValue)
-		if rawValue == "" {
+		value := normalizeSkillSource(rawValue)
+		if value == "" {
 			continue
 		}
-		blocked[filepath.Clean(expandSourcePath(rawValue))] = true
+		blocked[value] = true
 	}
 	seen := make(map[string]bool, len(sources))
 	out := make([]string, 0, len(sources))
 	for _, rawSource := range sources {
-		rawSource = strings.TrimSpace(rawSource)
-		if rawSource == "" {
+		source := normalizeSkillSource(rawSource)
+		if source == "" {
 			continue
 		}
-		source := filepath.Clean(expandSourcePath(rawSource))
-		if source == "" || blocked[source] || seen[source] {
+		if blocked[source] || seen[source] {
 			continue
 		}
 		seen[source] = true
@@ -272,7 +274,7 @@ func parseSkillMeta(skillFile, skillDir string) (SkillMeta, error) {
 		return SkillMeta{}, fmt.Errorf("SKILL.md 超过 %d MiB 限制", maxSkillMetadataFile>>20)
 	}
 
-	content := string(data)
+	content := strings.TrimPrefix(string(data), "\ufeff")
 	meta := SkillMeta{
 		Path:          skillFile,
 		Dir:           skillDir,
@@ -280,12 +282,9 @@ func parseSkillMeta(skillFile, skillDir string) (SkillMeta, error) {
 		UserInvocable: true,
 	}
 
-	if !strings.HasPrefix(content, "---") {
-		return SkillMeta{}, fmt.Errorf("SKILL.md 缺少 YAML frontmatter")
-	}
-	parts := strings.SplitN(content, "---", 3)
-	if len(parts) < 3 {
-		return SkillMeta{}, fmt.Errorf("SKILL.md frontmatter 未闭合")
+	frontmatter, err := skillFrontmatter(content)
+	if err != nil {
+		return SkillMeta{}, err
 	}
 	var raw struct {
 		Name                   string `yaml:"name"`
@@ -294,7 +293,7 @@ func parseSkillMeta(skillFile, skillDir string) (SkillMeta, error) {
 		DisableModelInvocation bool   `yaml:"disable-model-invocation"`
 		UserInvocable          *bool  `yaml:"user-invocable"`
 	}
-	if err := yaml.Unmarshal([]byte(parts[1]), &raw); err != nil {
+	if err := yaml.Unmarshal([]byte(frontmatter), &raw); err != nil {
 		return SkillMeta{}, err
 	}
 	meta.Name, meta.Description, meta.License = raw.Name, raw.Description, raw.License
@@ -323,11 +322,30 @@ func parseSkillMeta(skillFile, skillDir string) (SkillMeta, error) {
 		} `yaml:"policy"`
 	}
 	if data, err := os.ReadFile(filepath.Join(skillDir, "agents", "openai.yaml")); err == nil && yaml.Unmarshal(data, &openAI) == nil && openAI.Policy.AllowImplicit != nil {
-		meta.AllowImplicit = *openAI.Policy.AllowImplicit
-		meta.InvocationSource = "agents/openai.yaml"
+		// An explicit opt-out in SKILL.md must not be reversed by a secondary
+		// metadata file. Either source may restrict model invocation.
+		if meta.AllowImplicit || !*openAI.Policy.AllowImplicit {
+			meta.AllowImplicit = *openAI.Policy.AllowImplicit
+			meta.InvocationSource = "agents/openai.yaml"
+		}
 	}
 
 	return meta, nil
+}
+
+// skillFrontmatter recognizes delimiters only on their own lines, so a
+// description containing "---" does not prematurely terminate the YAML.
+func skillFrontmatter(content string) (string, error) {
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", fmt.Errorf("SKILL.md 缺少 YAML frontmatter")
+	}
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return strings.Join(lines[1:i], "\n"), nil
+		}
+	}
+	return "", fmt.Errorf("SKILL.md frontmatter 未闭合")
 }
 
 // keepMCPAdapterSkill prevents ClawHub's python fofa_recon.py wrapper from
@@ -378,9 +396,45 @@ func expandSourcePath(path string) string {
 
 // DefaultSources 返回默认 Skill 来源路径
 func DefaultSources() []string {
-	sources := []string{"skills"}
+	sources := executableSkillSources()
+	sources = append(sources, "skills")
 	if home, err := os.UserHomeDir(); err == nil {
 		sources = append(sources, filepath.Join(home, ".deepsentry", "skills"))
 	}
 	return sources
+}
+
+func executableSkillSources() []string {
+	// Installed binaries may run from an arbitrary working directory. Release
+	// archives keep the bundled playbooks beside the executable, while build/bin
+	// aliases find them one directory above.
+	var sources []string
+	if executable, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+			executable = resolved
+		}
+		dir := filepath.Dir(executable)
+		sources = append(sources,
+			filepath.Join(dir, "..", "bundled-skills"),
+			filepath.Join(dir, "..", "skills"),
+			filepath.Join(dir, "bundled-skills"),
+			filepath.Join(dir, "skills"),
+		)
+	}
+	return sources
+}
+
+func normalizeSkillSource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ""
+	}
+	source = filepath.Clean(expandSourcePath(source))
+	if absolute, err := filepath.Abs(source); err == nil {
+		source = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(source); err == nil {
+		source = resolved
+	}
+	return source
 }

@@ -57,7 +57,11 @@ func browserPath(configured string) string {
 	}
 	if runtime.GOOS == "windows" {
 		for _, base := range []string{os.Getenv("PROGRAMFILES"), os.Getenv("PROGRAMFILES(X86)"), os.Getenv("LOCALAPPDATA")} {
+			if strings.TrimSpace(base) == "" {
+				continue
+			}
 			p := base + `\Google\Chrome\Application\chrome.exe`
+			// #nosec G703 -- Local operator-controlled Windows installation directories; only checks for the browser executable, not a remote request path.
 			if _, e := os.Stat(p); e == nil {
 				return p
 			}

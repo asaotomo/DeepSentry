@@ -23,6 +23,23 @@ func TestFancyEnvOverridesPlainTerminal(t *testing.T) {
 	}
 }
 
+func TestLegacyEmojiCollapsesToOneCell(t *testing.T) {
+	t.Setenv("DEEPSENTRY_PLAIN", "1")
+	t.Setenv("DEEPSENTRY_LEGACY_CONSOLE", "1")
+	t.Setenv("DEEPSENTRY_FANCY", "")
+	t.Setenv("DEEPSENTRY_NO_COLOR", "1")
+	got := TerminalText("[17:18:39] 💭 内存不是瓶颈，因此补查CPU")
+	if got != "[17:18:39] * 内存不是瓶颈，因此补查CPU" {
+		t.Fatalf("thought icon: %q", got)
+	}
+	if got := TerminalText("结论🤔✅"); got != "结论*[OK]" {
+		t.Fatalf("mixed emoji: %q", got)
+	}
+	if got := TerminalText("✓ 已批准"); got != "+ 已批准" {
+		t.Fatalf("check mark: %q", got)
+	}
+}
+
 func TestTerminalTextReplacesAmbiguousSymbols(t *testing.T) {
 	t.Setenv("DEEPSENTRY_PLAIN", "1")
 	t.Setenv("DEEPSENTRY_FANCY", "")

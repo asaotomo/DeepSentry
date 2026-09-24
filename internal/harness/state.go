@@ -9,6 +9,7 @@ import (
 
 // AgentState 持久化 Agent 运行时状态（对标 DeepAgentState）
 type AgentState struct {
+	WorkContext           map[string]string `json:"work_context,omitempty"`
 	Todos                 []TodoItem
 	LoadedSkills          map[string]string // skill name -> full content
 	Memory                map[string]string // 会话内临时 KV（不落盘）
@@ -17,6 +18,9 @@ type AgentState struct {
 	TriedTools            map[string]bool   `json:"tried_tools,omitempty"` // 本会话已真正执行过的工具（用于 ZIP 原生优先等路由）
 	PendingToolCalls      map[string]ToolCallRecord
 	CompletedToolCalls    map[string]ToolCallRecord
+	PendingAction         string `json:"pending_action,omitempty"`        // redacted main-agent action awaiting a durable result
+	PendingActionHash     string `json:"pending_action_hash,omitempty"`   // executable fingerprint; never contains raw arguments
+	RecoveryBlockedHash   string `json:"recovery_blocked_hash,omitempty"` // uncertain action must not be replayed before a read-only check
 	Artifacts             []ArtifactRecord
 	WorkspaceDir          string // 工具输出卸载目录
 	SessionID             string // checkpoint/session id，用于隔离输出卸载文件
@@ -253,4 +257,23 @@ func (s *AgentState) GetMemory(key string) (string, bool) {
 	defer s.mu.RUnlock()
 	v, ok := s.Memory[key]
 	return v, ok
+}
+
+// ResetLoopTurn gives a new user turn a fresh recovery budget, preserving evidence.
+func (s *AgentState) ResetLoopTurn() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastActionFingerprint = ""
+	s.LastActionRepeat = 0
+	s.LastOutputHash = ""
+	s.LastFailed = false
+	s.LastErrorClass = ""
+	s.StallCount = 0
+	s.FailStreak = 0
+	s.NoProgressStreak = 0
+	s.TimeoutStreak = 0
+	s.StepsSinceTodo = 0
 }

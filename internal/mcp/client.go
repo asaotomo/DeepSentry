@@ -54,11 +54,16 @@ type Registry struct {
 	ambiguous map[string]bool
 }
 
-var globalRegistry = &Registry{
-	tools:     make(map[string]*ExternalTool),
-	handlers:  make(map[string]ToolHandler),
-	aliases:   make(map[string]string),
-	ambiguous: make(map[string]bool),
+var globalRegistry = NewRegistry()
+
+// NewRegistry creates an isolated MCP tool registry.
+func NewRegistry() *Registry {
+	return &Registry{
+		tools:     make(map[string]*ExternalTool),
+		handlers:  make(map[string]ToolHandler),
+		aliases:   make(map[string]string),
+		ambiguous: make(map[string]bool),
+	}
 }
 
 // stdioConnection is retained as a protocol-compatibility adapter for older
@@ -251,6 +256,80 @@ func (r *Registry) ListNames() []string {
 	return names
 }
 
+// FormatToolDetail returns the live schema for a discovered MCP tool. The
+// canonical name is shown even when the caller used an unambiguous alias.
+func (r *Registry) FormatToolDetail(name string) (string, bool) {
+	tool, _, ok := r.Get(strings.TrimPrefix(strings.TrimSpace(name), "mcp:"))
+	if !ok || tool == nil {
+		return "", false
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "【MCP 工具 %s】\n服务: %s\n说明: %s\n", tool.Name, tool.Server, tool.Description)
+	fmt.Fprintf(&b, "调用: {\"action\":\"tool\",\"tool_name\":\"mcp:%s\",\"tool_args\":{...}}\n", tool.Name)
+	if len(tool.InputSchema) > 0 {
+		schema, err := json.MarshalIndent(tool.InputSchema, "", "  ")
+		if err == nil {
+			b.WriteString("参数 JSON Schema:\n")
+			b.Write(schema)
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString("tool_args 的值用字符串表达；object/array 参数传 JSON 字符串。服务端参数仍会按上述 schema 校验。\n")
+	return b.String(), true
+}
+
+// SearchToolSummaries exposes MCP tools that were omitted from the bounded
+// system prompt, without injecting every server schema on each model turn.
+func (r *Registry) SearchToolSummaries(query string, limit int) string {
+	if limit <= 0 {
+		limit = 12
+	}
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
+	type hit struct {
+		tool  ExternalTool
+		score int
+	}
+	var hits []hit
+	for _, tool := range r.ListTools() {
+		name := strings.ToLower(tool.Name + " " + tool.OriginalName)
+		other := strings.ToLower(tool.Server + " " + tool.Description)
+		score := 0
+		matched := true
+		for _, term := range terms {
+			switch {
+			case strings.Contains(name, term):
+				score += 2
+			case strings.Contains(other, term):
+				score++
+			default:
+				matched = false
+			}
+		}
+		if matched {
+			hits = append(hits, hit{tool: tool, score: score})
+		}
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score == hits[j].score {
+			return hits[i].tool.Name < hits[j].tool.Name
+		}
+		return hits[i].score > hits[j].score
+	})
+	var b strings.Builder
+	b.WriteString("【MCP 工具候选】精确参数请再用 tool_catalog(name=工具名) 查询。\n")
+	for i, item := range hits {
+		if i >= limit {
+			fmt.Fprintf(&b, "…另有 %d 个匹配工具。\n", len(hits)-limit)
+			break
+		}
+		fmt.Fprintf(&b, "- mcp:%s (%s): %s\n", item.tool.Name, item.tool.Server, truncateMCPText(item.tool.Description, 200))
+	}
+	return b.String()
+}
+
 // FormatPrompt 生成 MCP 工具 prompt 片段
 func (r *Registry) FormatPrompt() string {
 	r.mu.RLock()
@@ -261,6 +340,7 @@ func (r *Registry) FormatPrompt() string {
 	var b strings.Builder
 	b.WriteString("\n【MCP 扩展工具】\n")
 	b.WriteString("格式: {\"action\":\"tool\",\"tool_name\":\"mcp:<name>\",\"tool_args\":{...}}\n\n")
+	b.WriteString("需要完整参数时调用 tool_catalog(name=精确 MCP 名称)；工具未列出时用 tool_catalog(category=mcp, query=关键词) 搜索。\n")
 	hasHawkEye := false
 	hasFofaMap := false
 	names := make([]string, 0, len(r.tools))
@@ -320,7 +400,7 @@ func isHawkEyeExternalTool(tool *ExternalTool) bool {
 }
 
 func hawkEyeWorkflowPrompt() string {
-	return `【HawkEye MCP 1.0.7 深度适配工作流】
+	return `【HawkEye MCP 1.0.12 深度适配工作流】
 HawkEye 已出现在本会话工具列表中，就等于已经连通。禁止再用 execute/ls/md5/lsof/config_manage 做安装、端口或文件自检；直接完成用户任务。扩展弹窗需打开 “HawkEye Browser Automation MCP”，VIP/Pro 才能桥接。
 覆盖：本会话禁止用内置 browser_browse/browser_interact 打开、播放或全屏网页。真实浏览器一律走 HawkEye。
 - B站/哔哩哔哩/播放/倍速/全屏：第一步必须 load_skill("bilibili-play")，然后严格按该 skill 执行。合集第 N 集用 https://www.bilibili.com/video/BV...?p=N，不要靠连点播放器碰运气。

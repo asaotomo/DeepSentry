@@ -72,6 +72,42 @@ func TestStoreSupportsConcurrentSubAgentMemoryUpdates(t *testing.T) {
 	}
 }
 
+func TestStoreScopedSubAgentMemoryIsolationAndPersistence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := NewStore(ScopeLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for _, scope := range []string{"ssh:host-a", "ssh:host-b"} {
+		scope := scope
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := store.SetScoped(scope, "os", scope, "agent"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := store.ActiveEntries(); len(got) != 0 {
+		t.Fatalf("parent scope received child target memory: %#v", got)
+	}
+	for _, scope := range []string{"ssh:host-a", "ssh:host-b"} {
+		entries := store.ActiveEntriesForScope(scope)
+		if len(entries) != 1 || entries[0].Value != scope {
+			t.Fatalf("scope %s entries=%#v", scope, entries)
+		}
+	}
+	reloaded, err := NewStore("ssh:host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries := reloaded.ActiveEntries(); len(entries) != 1 || entries[0].Value != "ssh:host-a" {
+		t.Fatalf("scoped memory was not persisted: entries=%#v", entries)
+	}
+}
+
 func TestBuiltinAgentsMDLoadedWithoutExternalFile(t *testing.T) {
 	tmp := t.TempDir()
 	oldHome := os.Getenv("HOME")

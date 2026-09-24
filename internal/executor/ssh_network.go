@@ -191,8 +191,8 @@ func (s *SSHNetworkExecutor) RunWithStreaming(cmd string, onLine func(string)) (
 	if cmd == "" {
 		return "(空命令)", nil
 	}
-	if strings.Contains(cmd, "local_run ") {
-		return (&LocalExecutor{}).RunWithStreaming(strings.ReplaceAll(cmd, "local_run ", ""), onLine)
+	if strings.HasPrefix(cmd, "local_run ") {
+		return (&LocalExecutor{}).RunWithStreaming(strings.TrimPrefix(cmd, "local_run "), onLine)
 	}
 	if CommandUsesSudo(cmd) && s.deviceType == "linux" {
 		cmd = ForceNonInteractiveSudo(cmd)

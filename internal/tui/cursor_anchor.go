@@ -118,6 +118,7 @@ func (w *inputCursorOutput) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 
 	frame, clean := stripFrameMarkers(p)
+	clean = conhostFrame(clean)
 	n, err := w.dst.Write(clean)
 	if err != nil {
 		return 0, err

@@ -189,6 +189,22 @@ func TestParsePowerShellCommandKeepsRequestedShell(t *testing.T) {
 	if shell != "powershell" || script != "Get-Date" {
 		t.Fatalf("expected powershell command, got shell=%q script=%q", shell, script)
 	}
+	shell, script = parsePowerShellCommand(`powershell -NoProfile -Command "$p=@('C:\Program Files (x86)\Tencent')"`)
+	if shell != "powershell" || script != `$p=@('C:\Program Files (x86)\Tencent')` {
+		t.Fatalf("trailing script quote was stripped: %q", script)
+	}
+	for _, test := range []struct{ command, shell, script string }{
+		{`powershell.exe -Command "Write-Output 'C:\Temp\a b'"`, "powershell", `Write-Output 'C:\Temp\a b'`},
+		{`pwsh.exe -c "Get-Item 'C:\Temp'"`, "pwsh", `Get-Item 'C:\Temp'`},
+	} {
+		gotShell, gotScript := parsePowerShellCommand(test.command)
+		if gotShell != test.shell || gotScript != test.script {
+			t.Fatalf("parsePowerShellCommand(%q)=(%q,%q)", test.command, gotShell, gotScript)
+		}
+	}
+	if _, _, ok := splitPowerShellLauncher(`powershell-extra -Command whoami`); ok {
+		t.Fatal("non-PowerShell executable misclassified")
+	}
 }
 
 func TestParseTransferCommandKeepsQuotedPaths(t *testing.T) {
@@ -203,6 +219,31 @@ func TestParseTransferCommandKeepsQuotedPaths(t *testing.T) {
 	_, _, _, ok = parseTransferCommand(`download '/tmp/open`)
 	if ok {
 		t.Fatal("expected unterminated quote to fail")
+	}
+}
+
+func TestParseTransferCommandKeepsWindowsBackslashes(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		src     string
+		dst     string
+	}{
+		{`upload "C:\Users\测试 用户\report.txt" "D:\Backups\report.txt"`, `C:\Users\测试 用户\report.txt`, `D:\Backups\report.txt`},
+		{`download \\server\share\report.txt "C:\Temp\"`, `\\server\share\report.txt`, `C:\Temp\`},
+		{`upload ".\reports\" "D:\Backups\"`, `.\reports\`, `D:\Backups\`},
+		{`upload 'C:\Users\O'\''Brien\report & final.txt' "D:\Backups\report.txt"`, `C:\Users\O'Brien\report & final.txt`, `D:\Backups\report.txt`},
+	} {
+		_, src, dst, ok := parseTransferCommand(test.command)
+		if !ok || src != test.src || dst != test.dst {
+			t.Fatalf("parseTransferCommand(%q)=(%q,%q,%t)", test.command, src, dst, ok)
+		}
+	}
+}
+
+func TestLocalExecutorPreservesEmbeddedLocalRunText(t *testing.T) {
+	out, err := (&LocalExecutor{}).Run(`echo "literal local_run text"`)
+	if err != nil || !strings.Contains(out, "literal local_run text") {
+		t.Fatalf("embedded local_run changed command: %q %v", out, err)
 	}
 }
 

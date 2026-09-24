@@ -66,22 +66,7 @@ func CountUserTurns(history []analyzer.Message) int {
 // messages. Those observations intentionally use role=user for chat API
 // compatibility, but they are not conversation turns.
 func isRealUserTurn(m analyzer.Message) bool {
-	if m.Role != "user" {
-		return false
-	}
-	content := strings.TrimSpace(m.Content)
-	for _, prefix := range []string{
-		"Output:",
-		"系统警告:",
-		"【系统】",
-		"上一步执行失败:",
-		"用户拒绝执行",
-	} {
-		if strings.HasPrefix(content, prefix) {
-			return false
-		}
-	}
-	return content != ""
+	return analyzer.IsRealUserTurn(m)
 }
 
 // CommitFinishToHistory 将 finish 结论写入 history，供下一轮追问引用

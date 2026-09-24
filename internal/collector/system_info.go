@@ -66,6 +66,12 @@ func GetSystemContext() SystemContext {
 	isWindows := false
 	isRemote := executor.Current != nil && executor.Current.IsRemote()
 
+	if !isRemote && runtime.GOOS == "windows" {
+		if local, ok := localWindowsContext(); ok {
+			return local
+		}
+	}
+
 	if !isRemote {
 		// [本地模式] 优先使用 Go 运行时信息，避免执行 uname 报错
 		if runtime.GOOS == "windows" {
@@ -114,12 +120,12 @@ func GetSystemContext() SystemContext {
 		ctx.Username = run("whoami")
 		ctx.KernelVersion = ctx.OS
 
-		// Windows 资源信息 (使用 wmic)
-		ctx.MemoryStatus = run("wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /Value")
+		// Windows 资源信息 (CIM，兼容未安装 WMIC 的 Windows 11)
+		ctx.MemoryStatus = run(`powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory"`)
 		ctx.MemoryStatus = strings.ReplaceAll(ctx.MemoryStatus, "\r\n", " ")
 
-		ctx.DiskStatus = run("wmic logicaldisk get size,freespace,caption")
-		ctx.CPUInfo = run("wmic cpu get name")
+		ctx.DiskStatus = run(`powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,FreeSpace,Size"`)
+		ctx.CPUInfo = run(`powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Processor | Select-Object Name"`)
 
 		// 获取 IP 地址
 		ctx.LocalIPs = []string{run("ipconfig | findstr IPv4")}

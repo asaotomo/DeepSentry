@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"ai-edr/internal/benchmark"
@@ -165,8 +166,11 @@ func progressBar(pct float64, width int) string {
 
 // RunBenchmark 在 TUI 中运行 benchmark
 func RunBenchmark(cfgPath string, skipLLM, skipRemote bool) error {
+	restoreConsole := prepareConsoleDisplay()
+	defer restoreConsole()
 	m := NewBenchmarkModel()
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithOutput(newInputCursorOutput(os.Stdout, nil)))
+	defer startConsoleResizeWatcher(p)()
 
 	go func() {
 		report, err := benchmark.RunSuiteWithProgress(cfgPath, skipLLM, skipRemote, func(id, name string, score float64, passed bool, cur, total int) {

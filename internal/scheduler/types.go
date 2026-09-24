@@ -5,6 +5,8 @@ import "time"
 const (
 	DefaultStorePath = "reports/schedules/tasks.json"
 
+	StatusRunning   = "running"
+	StatusFailed    = "failed"
 	StatusEnabled   = "enabled"
 	StatusDisabled  = "disabled"
 	StatusCompleted = "completed"
@@ -24,6 +26,8 @@ const (
 )
 
 type Task struct {
+	TimeoutSec     int        `json:"timeout_sec,omitempty"`
+	FailureCount   int        `json:"failure_count,omitempty"`
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
 	Prompt         string     `json:"prompt"`
@@ -37,6 +41,8 @@ type Task struct {
 	Report         bool       `json:"report"`
 	Notify         string     `json:"notify"`
 	AllowBatch     bool       `json:"allow_batch,omitempty"`
+	ReplyText      string     `json:"reply_text,omitempty"`
+	ReplySession   string     `json:"reply_session,omitempty"`
 	Status         string     `json:"status"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -47,16 +53,20 @@ type Task struct {
 }
 
 type PlanInput struct {
-	Text       string
-	Prompt     string
-	RunAt      string
-	Repeat     string
-	Notify     string
-	Selector   string
-	Kind       string
-	Timezone   string
-	Report     *bool
-	AllowBatch bool
+	TimeoutSec   string
+	Text         string
+	Prompt       string
+	RunAt        string
+	Repeat       string
+	IntervalSec  string
+	Notify       string
+	Selector     string
+	Kind         string
+	Timezone     string
+	Report       *bool
+	AllowBatch   bool
+	ReplyText    string
+	ReplySession string
 }
 
 type Plan struct {

@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛡️ DeepSentry v2.0.4 Ultimate — 深海哨兵
+# 🛡️ DeepSentry v2.0.5 Ultimate — 深海哨兵
 
 <h3>"让 AI 成为你的红蓝对抗伙伴与安全运维专家。"</h3>
 
@@ -10,13 +10,14 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Team-Hx0-red?style=flat-square" alt="Team">
-  <img src="https://img.shields.io/badge/Version-v2.0.4%20Ultimate-2f81f7?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-v2.0.5%20Ultimate-2f81f7?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Status-Released-brightgreen?style=flat-square" alt="Released">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-gray?style=flat-square&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/Go-1.26.8+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go">
   <img src="https://img.shields.io/badge/AI-Multi--Provider-blueviolet?style=flat-square" alt="AI">
 </p>
 
-[一眼看懂](#一眼看懂) • [下载](#下载哪个文件) • [聊天机器人](#聊天机器人接入) • [巡检报告](#网页巡检与-word-报告) • [使用技巧](#v204-使用小技巧) • [案例用法](#典型场景与案例用法) • [快速开始](#5-分钟快速开始)
+[一眼看懂](#一眼看懂) • [下载](#下载哪个文件) • [聊天机器人](#聊天机器人接入) • [巡检报告](#网页巡检与-word-报告) • [使用技巧](#使用小技巧) • [案例用法](#典型场景与案例用法) • [快速开始](#5-分钟快速开始)
 
 </div>
 
@@ -27,7 +28,7 @@ v2.0.4 起也可以：
 1. 在 **微信、QQ、企业微信、飞书、钉钉** 里私聊指挥（验证码回原任务，高危操作当场确认）。
 2. 对设备 **Web 控制台做网页巡检**，保留真实截图，一句话生成带封面的 **Word / Markdown**。
 
-<img width="1672" height="941" alt="Deepsentry2 0 4海报" src="https://github.com/user-attachments/assets/a04f8117-4856-41b4-b8d8-53ad05b5225e" />
+![DeepSentry v2.0.5 Ultimate 宣传图](assets/DeepSentry-v2.0.5-poster.png)
 
 > **授权范围**：只允许在你拥有或已获得明确书面授权的系统上使用。禁止未授权扫描、入侵、破坏、绕过访问控制或任何违法用途。
 
@@ -35,11 +36,23 @@ v2.0.4 起也可以：
 
 ---
 
+## v2.0.5（2026-09-24）
+
+2.0.5 已发布。本节概览相对于 2.0.4 的主要变化；下载构建产物和校验值请前往 [GitHub Releases](https://github.com/asaotomo/DeepSentry/releases)。
+
+- **Agent 与多目标：**新增服务器/终端基线加固等专职子 Agent、独立子任务恢复点和有来源的线索协作；Fleet 与 AWD-Plus 可按目标和服务并行采证、分批处置。
+- **桌面与界面：**新增 Computer Use，改善 Windows 控制台和常驻 PowerShell helper，并修复旧截图误用、输入框鼠标报文和聊天流式显示问题。
+- **聊天与定时：**收紧高危操作确认，改善微信、QQ、钉钉等渠道的回复可靠性；周期提醒和定时 Agent/巡检结果可回到原会话，并由 `/schedule` 管理。
+- **报告与长任务：**Markdown 报告关联风险、授权与证据编号，同步保存 SHA256 串联的脱敏证据档案；检查点、`task_wait` 和 `task_context` 支持长任务继续执行。
+- **扩展与连接：**Skill 目录和调用策略修复、内置 Skill 随包分发；更新 HawkEye MCP 适配，并增加本机 SOCKS5/HTTP 代理服务。
+
+Windows/Linux 真实桌面与完整视觉操作链仍需真机验收；Linux 桌面目前依赖 X11。详细变化和适用范围见 [更新日志](CHANGELOG.md) 与 [电脑操作说明](docs/Computer-Use.md)。
+
 ## 目录
 
 - [一眼看懂](#一眼看懂)
 - [最新版本亮点](#最新版本亮点)
-- [v2.0.4 使用小技巧](#v204-使用小技巧)
+- [使用小技巧](#使用小技巧)
 - [典型场景与案例用法](#典型场景与案例用法)
 - [CTF / AWD / AWD-Plus 能力](#ctf--awd--awd-plus-能力)
 - [下载哪个文件](#下载哪个文件)
@@ -87,7 +100,7 @@ v2.0.4 起也可以：
 | 分析安全事件 | 读日志、筛异常登录、关联可疑进程和网络连接 |
 | 多台一起巡检 | 配置主机清单，按名称或标签批量只读检查 |
 | 比赛 / 演练辅助 | CTF 初筛、AWD 值守、多靶机协同（必须在授权环境） |
-| 要审计留痕 | 每次任务写 Markdown；网页巡检额外出 Word |
+| 要审计留痕 | 每次任务写 Markdown，并附带可校验的证据档案；网页巡检额外出 Word |
 | 目标机几乎没工具 | 大量能力在控制端用 Go 实现，不依赖目标机装齐常用命令 |
 
 你需要准备：
@@ -96,7 +109,7 @@ v2.0.4 起也可以：
 2. **一台你有权检查的机器或网页控制台**。默认先查本机。
 3. （可选）**聊天软件**，以及 Hx0 的 **鹰眼 / FofaMap**。前者用来手机指挥；鹰眼负责真实浏览器巡检截图，FofaMap 负责互联网资产测绘。都不是第一步的必需品。
 
-核心能力：中文全屏终端、本地 / SSH / Telnet / FTP / 多主机、73 个内置工具、会话恢复、定时任务、聊天机器人、网页巡检 Word、对 **Hx0 鹰眼 MCP** 与 **FofaMap MCP** 的深度适配。
+核心能力：中文全屏终端、本地 / SSH / Telnet / FTP / 多主机、77 个内置工具、会话恢复、定时任务、聊天机器人、网页巡检 Word、对 **Hx0 鹰眼 MCP** 与 **FofaMap MCP** 的深度适配。
 
 ---
 
@@ -109,7 +122,7 @@ v2.0.4 起也可以：
 # 若你是从源码编译： ./build/deepsentry --version
 ```
 
-应看到 `DeepSentry v2.0.4 Ultimate (build 日期)`。日期随你下载或自行编译的包变化。
+应看到 `DeepSentry v2.0.5 Ultimate (build 日期)`。日期随你下载或自行编译的包变化。
 
 | 你能直接用到的 | 说明 |
 | --- | --- |
@@ -121,7 +134,7 @@ v2.0.4 起也可以：
 | 网页巡检出 Word | 接上鹰眼后打开设备后台，说「生成报告」即可。不用写 JSON，不用安装 pandoc |
 | Word 版式 | 封面 + 先结论再细节和建议，截图跟在对应章节后面 |
 | 每天自动巡 | 无验证码的固定检查可定时跑；要人眼看验证码的，请从聊天里触发 |
-| 鹰眼 MCP 深度适配 | [Hx0 鹰眼](https://hx0studio.com/) 是我们做的浏览器自动化。DeepSentry 按 MCP 1.0.7 的 51 个工具做了点对点适配（登录、截图、验证码辅助、长页续读），不是通用转发 |
+| 鹰眼 MCP 深度适配 | [Hx0 鹰眼](https://hx0studio.com/) 是我们做的浏览器自动化。DeepSentry 按 MCP 1.0.12 的 51 个工具做了点对点适配（登录、截图、验证码辅助、长页续读），不是通用转发 |
 | FofaMap MCP 深度适配 | [FofaMap](https://hx0studio.com/) 是我们做的 FOFA 资产测绘客户端。DeepSentry 按 v2.0.1 的 15 个工具做了点对点适配（账户、规则、搜索、翻页、导出），密钥仍留在 FofaMap 里 |
 | 视觉模型 | 常见多模态型号会自动识别截图；纯文本模型不会被硬塞图片 |
 
@@ -129,7 +142,7 @@ v2.0.4 起也可以：
 
 ---
 
-## v2.0.4 使用小技巧
+## 使用小技巧
 
 最有效的提示词不是“帮我看看”，而是一次给清楚四件事：**目标、范围、权限边界、交付物**。
 
@@ -148,6 +161,11 @@ v2.0.4 起也可以：
 | 网页出 Word | 巡检结束后说「生成报告」；先结论、再详情和建议，截图跟章节走 |
 | 聊天验证码 | 先看机器人发来的图，直接回复，不要 `/new` |
 | 聊天会话 | 「重启会话」开新对话，「切换会话」按序号恢复；停住了回「继续」 |
+| 聊天确认 | 只认「允许本次 / 本会话同类 / 本次会话允许所有高危操作 / 拒绝」；「好」「ok」不会放行，10 分钟没回复按拒绝 |
+| 聊天里的定时任务 | 在 QQ、微信、钉钉、企业微信或飞书里创建的任务，到点发回原来的对话；只发一句话用 `reply_text` |
+| 定时任务管理 | TUI 用 `/schedule` 查看、修改、取消、重置或删除；触发仍要 `--scheduler` 常驻 |
+| 报告与证据 | 每次对话同时留下 Markdown 和 `.evidence.jsonl`；报告标风险和是否经确认，证据用 SHA256 串成链 |
+| 电脑操作 | 先 `--computer-check`；同一应用换窗口要重新截图；`--batch` 不会自动点鼠标 |
 | 输入框清空 | `Ctrl+A` 全选后再按删除；`Ctrl+U` 也能一键清空 |
 | 日常排障 | 第一轮明确“只读取证”；模型给出根因和最小修改方案后，再单独批准变更与复验 |
 | 华为/H3C/锐捷 | 配置 `ssh_device_type` / `telnet_device_type`；先执行完整 `display/show`，确认上下文后再过滤 |
@@ -537,7 +555,7 @@ vision_mode: auto
 agent_runtime: v3
 ```
 
-`vision_mode: auto` 使用精确模型目录判断图片能力。当前内置的多模态默认模型包括 `deepseek-flash`、`deepseek-v4-flash-vision-exp`、`glm-5.3-flash`、`MiniMax-M3`、`mimo-v2.5`、`gpt-6-astra`（ChatGPT 6）、`gpt-5.6`、`claude-opus-5`、`claude-sonnet-5`、`gemini-3.8-flash` 和 `qwen3.8-max`；选择这些模型无需手动开启图片输入。相近的纯文本型号仍保持关闭，避免把 MCP 截图错误发给不支持图片的接口。
+`vision_mode: auto` 使用精确模型目录判断图片能力。当前内置的多模态模型包括 `deepseek-flash`、`deepseek-v4-flash-vision-exp`、`glm-5.3-flash`、`MiniMax-M3`、`mimo-v2.6-pro`、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`、`grok-4.7`、`gpt-5.6`、`claude-opus-5-5`、`claude-fable-5-1`、`claude-sonnet-5`、`gemini-3.8-flash` 和 `qwen3.8-max`；选择这些模型无需手动开启图片输入。相近的纯文本型号仍保持关闭，避免把 MCP 截图错误发给不支持图片的接口。
 
 Runtime v3 默认启用结构化多工具调用、模型故障切换、可恢复执行断点和脱敏事件追踪。通常无需设置 `agent_runtime`；旧模型网关出现兼容问题时，可临时使用 `legacy` 模式排查。
 
@@ -649,7 +667,7 @@ TUI 模式，适合日常使用：
 
 私聊可直接发任务，不必加 `/ds`。同一私聊自动续聊；`/new` 或「重启会话」会取消旧执行与排队，旧确认作废。最多同时 5 路任务，同会话后续消息排队。
 
-低风险自动执行。高危/中风险在**同一聊天会话**询问，回复「允许本次」「本会话同类」「本次会话允许所有高危操作」或「拒绝」。验证码先推截图再问你，下一条文字回到原任务，不会新开 Agent；「本会话所有高危」不会自动替你填验证码。
+低风险自动执行。高危/中风险在**同一聊天会话**询问，确认消息会带上具体命令和拦截理由，回复「允许本次」「本会话同类」「本次会话允许所有高危操作」或「拒绝」。验证码先推截图再问你，下一条文字回到原任务，不会新开 Agent；「本会话所有高危」不会自动替你填验证码。
 
 微信、QQ、飞书、企业微信、钉钉支持图片/文件/语音入站（以平台能力为准）；出站可回传图片和 Word。入站附件会在入队后立刻预取，避免短时签名 URL 过期。图片作为真实视觉内容交给模型，不是只传文件名。
 
@@ -747,7 +765,7 @@ benchmark_token: "YOUR_BENCHMARK_TOKEN"
 | `model_name` | 建议填 | 模型名称，留空时使用 provider 预设 |
 | `model_profile` | 否 | `auto` 根据本地/云端、参数量和窗口选择 `compact` / `balanced` / `full` |
 | `model_parameter_b` | 否 | 本地模型参数量（B）；模型名含 `14b` / `70b` 时可自动识别 |
-| `context_window_tokens` | 本地建议填 | 实际运行时窗口，而非模型卡理论上限；Ollama/LM Studio 应与 `num_ctx` / `max_model_len` 一致 |
+| `context_window_tokens` | 否 | `0` 优先读取 Ollama/LM Studio 当前加载实例的实际窗口；其他服务建议显式填写运行时值，而非模型卡理论上限 |
 | `context_utilization` | 否 | 可用窗口比例；0 按 profile 自动留出 provider 开销和输出空间 |
 | `reserved_output_tokens` | 否 | 输出预留/上限；0 自动，不兼容 `max_tokens` 的网关会自动重试 |
 | `native_tool_limit` | 否 | 每轮直接暴露的内置工具数；0 自动，未暴露工具仍可经 `tool_catalog` 发现 |
@@ -773,7 +791,7 @@ custom / qianfan-code-latest · ctx≈131.1K[安全默认]
 | --- | --- | --- | --- |
 | `qianfan` | 百度千帆 Coding Plan | `https://qianfan.baidubce.com/v2/coding` | `qianfan-code-latest` |
 | `volcengine` | 火山方舟 Coding Plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | `ark-code-latest` |
-| `mimo` | Xiaomi MiMo Token Plan / MiMo Claw | `https://token-plan-cn.xiaomimimo.com/v1` | `mimo-v2.5` |
+| `mimo` | Xiaomi MiMo Token Plan / MiMo Claw | `https://token-plan-cn.xiaomimimo.com/v1` | `mimo-v2.6-pro` |
 
 服务商的套餐名称、模型别名和接口地址可能调整；预设不可用时，请以服务商最新文档为准，并在 `config.yaml` 中显式覆盖 `api_url` 和 `model_name`。
 
@@ -784,15 +802,15 @@ custom / qianfan-code-latest · ctx≈131.1K[安全默认]
 | `deepseek` | `https://api.deepseek.com` | `deepseek-flash` | 是 | 1,000,000 tokens |
 | `glm` | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.3-flash` | 是 | 1,000,000 tokens |
 | `minimax` | `https://api.minimax.cn/v1` | `MiniMax-M3` | 是 | 1,000,000 tokens |
-| `mimo` | `https://token-plan-cn.xiaomimimo.com/v1` | `mimo-v2.5` | 是 | 1,000,000 tokens |
+| `mimo` | `https://token-plan-cn.xiaomimimo.com/v1` | `mimo-v2.6-pro` | 是 | 1,000,000 tokens |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.8-max` | 是 | 1,000,000 tokens |
 | `hunyuan` | `https://tokenhub.tencentmaas.com/v1` | `hy4-preview` | 否 | 1,000,000 tokens |
 | `openai` | `https://api.openai.com/v1` | `gpt-6-astra` | 是 | 1,050,000 tokens |
-| `anthropic` | `https://api.anthropic.com/v1` | `claude-opus-5` | 是 | 1,000,000 tokens |
+| `anthropic` | `https://api.anthropic.com/v1` | `claude-opus-5-5` | 是 | 1,000,000 tokens |
 | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-3.8-flash` | 是 | 1,048,576 tokens |
-| `xai` | `https://api.x.ai/v1` | `grok-4.6` | 是 | 500,000 tokens |
+| `xai` | `https://api.x.ai/v1` | `grok-4.7` | 是 | 500,000 tokens |
 
-Claude 走官方 Messages 接口（`https://api.anthropic.com/v1/messages`，`anthropic-version: 2023-06-01`）。`claude-opus-5` / `claude-sonnet-5` / `claude-fable-5-1` 默认开启 adaptive thinking，DeepSentry 会预留 64K `max_tokens` 并解析 `thinking` 块；`claude-haiku-4-5` 仍按普通输出额度。Gemini 继续用官方 OpenAI 兼容端点 `.../v1beta/openai`。千问默认已切到旗舰 `qwen3.8-max`。
+OpenAI 新配置默认 `gpt-6-astra`，模型候选另有 `gpt-6-sol` 与 `gpt-6-luna`，均走 Responses API。Claude 走官方 Messages 接口（`https://api.anthropic.com/v1/messages`，`anthropic-version: 2023-06-01`）。`claude-opus-5-5` / `claude-fable-5-1` / `claude-sonnet-5` 使用 adaptive thinking，DeepSentry 默认预留 64K `max_tokens` 并解析 `thinking` 块；Opus 5.5 使用 `medium` effort，其他上述 Claude 5 模型使用 `high`。`claude-haiku-4-5` 仍按普通输出额度。Gemini 继续用官方 OpenAI 兼容端点 `.../v1beta/openai`。千问默认已切到旗舰 `qwen3.8-max`。
 
 ### TSecBench 跑分配置
 
@@ -833,6 +851,8 @@ TUI 快捷方式：
 
 复杂任务中，主 Agent 会优先把独立方向拆给子 Agent。例如日志、网络、Webshell 三个方向可以并行执行。运行器会去除完全重复的委派、限制总并发，并避免 target-aware 任务形成嵌套并发风暴。
 
+子 Agent 还包括服务器/终端基线加固、主机应急和网络设备排查等专职角色。主 Agent 负责跨角色合并证据、确认变更范围并给出最终报告；子 Agent 只处理委派的目标和证据类型。每个子任务独立保存 checkpoint，父会话先登记本轮子任务；停止后用 `--resume` 或在同一 TUI 会话输入“继续”时，会从子 Agent 的安全边界恢复。新任务不会误接旧子任务，结果不明的修改动作不会自动重放。
+
 每个子 Agent 都会收到主任务目标、当前 TODO 和会话核心线索。并行执行期间只共享有界的高信号线索板（IP、URL、CVE、哈希、路径、明确结论），不互相复制原始长对话；后续步骤可以读取其他子 Agent 刚发布的证据。线索保留来源，仍需结合证据区分用户提供、已验证事实和推断。完成后由主 Agent 按“已验证事实 / 证据 / 冲突与不确定项 / 下一步”合并结果。
 
 长会话采用分层上下文：原始目标和最新用户修正固定保留，早期执行轨迹按预算摘要，最近步骤保留原文。摘要服务失败时仍会保留上一版有效摘要与核心线索。核心线索随 checkpoint 保存；真正需要跨会话长期使用的规则和偏好仍通过 `remember` 或 `AGENTS.md` 保存。
@@ -841,7 +861,8 @@ TUI 快捷方式：
 
 ```text
 openai, anthropic, google, deepseek, qwen, qianfan, volcengine, hunyuan, tencent_hy,
-teleai, ctyun, minimax, mimo, glm, xai, grok, ollama, lmstudio, custom
+teleai, ctyun, minimax, mimo, glm, xai, grok, ollama, lmstudio, vllm, llamacpp,
+sglang, localai, custom
 ```
 
 ### 目标连接字段
@@ -887,7 +908,7 @@ teleai, ctyun, minimax, mimo, glm, xai, grok, ollama, lmstudio, custom
 
 ### 浏览器级网页能力
 
-已连接 HawkEye MCP 1.0.7 时，打开/播放真实网页（尤其 B 站、倍速、全屏）走 HawkEye，**不要**用内置 `browser_browse`。B 站播放任务先 `load_skill("bilibili-play")`：按 URL 导航、合集用 `?p=N`、倍速设 `video.playbackRate`、全屏 `press_key f`、黑屏截图改用 canvas 抓帧。大页面续读只传 `page_token`；验证码走 `browser_captcha_assist`。详见 [DeepSentry × Hx0 HawkEye MCP 深度适配](docs/HawkEye-MCP-深度适配.md)。
+已连接 HawkEye MCP 1.0.12 时，打开/播放真实网页（尤其 B 站、倍速、全屏）走 HawkEye，**不要**用内置 `browser_browse`。B 站播放任务先 `load_skill("bilibili-play")`：按 URL 导航、合集用 `?p=N`、倍速设 `video.playbackRate`、全屏 `press_key f`、黑屏截图改用 canvas 抓帧。大页面续读只传 `page_token`；验证码走 `browser_captcha_assist`。详见 [DeepSentry × Hx0 HawkEye MCP 深度适配](docs/HawkEye-MCP-深度适配.md)。
 
 未连接 HawkEye 时，Agent 才优先调用 `browser_browse`，创建一个可持续复用的隔离浏览器会话：
 
@@ -1143,7 +1164,7 @@ TUI 是默认模式：
 
 长文本粘贴（超过 2 行或 800 字符）会显示为紧凑的“粘贴文本”块，完整内容仍会发送给 Agent；短粘贴直接显示原文。粘贴后输入的补充文字保持可见、可编辑。多行或自动换行输入中，`↑` / `↓` 优先移动光标，到达边界后才切换历史。
 
-在输入框直接按 `⌘V`（macOS）或 `Ctrl+V` 即可粘贴：剪贴板含图片时立即生成附件卡，没有图片时自动粘贴文本。macOS 上终端会先处理 Command+V 的文本粘贴；仅当 DeepSentry 所在窗口处于前台时，才会把图片剪贴板贴进附件卡。也可使用 `/image /绝对或相对路径/screen.png`；不带路径的 `/image` 会读取系统图片剪贴板。支持 PNG/JPEG/GIF/WebP，单张最多 20 MiB、单条消息最多 8 张且合计最多 40 MiB。图片草稿以紧凑卡片显示，纯图片也可直接发送。`vision_mode: auto` 优先识别精确的官方模型 ID，目前会为 `deepseek-flash`、`gpt-6-astra`、`glm-5.3-flash`、`MiniMax-M3`、`mimo-v2.5`、`claude-opus-5`、`qwen3.8-max` 自动开启图片输入；自定义视觉模型名无法识别时设为 `enabled`。文本 fallback 不会接收图片。
+在输入框直接按 `⌘V`（macOS）或 `Ctrl+V` 即可粘贴：剪贴板含图片时立即生成附件卡，没有图片时自动粘贴文本。macOS 上终端会先处理 Command+V 的文本粘贴；仅当 DeepSentry 所在窗口处于前台时，才会把图片剪贴板贴进附件卡。也可使用 `/image /绝对或相对路径/screen.png`；不带路径的 `/image` 会读取系统图片剪贴板。支持 PNG/JPEG/GIF/WebP，单张最多 20 MiB、单条消息最多 8 张且合计最多 40 MiB。图片草稿以紧凑卡片显示，纯图片也可直接发送。`vision_mode: auto` 优先识别精确的官方模型 ID，目前会为 `deepseek-flash`、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`、`grok-4.7`、`glm-5.3-flash`、`MiniMax-M3`、`mimo-v2.6-pro`、`claude-opus-5-5`、`qwen3.8-max` 自动开启图片输入；自定义视觉模型名无法识别时设为 `enabled`。文本 fallback 不会接收图片。
 
 `A` 会话授权按“同一目标 + 同一工具/操作类型”复用，ID、正文和 payload 等普通参数可以变化；文件路径、Shell 命令、主机/服务端等目标身份和密码、Token 等敏感参数变化仍会重新询问。授权仅在当前运行中的会话控制器内有效，新建或恢复 checkpoint 时清空。
 
@@ -1185,7 +1206,12 @@ TUI 是默认模式：
 
 ## 内置工具清单
 
-当前版本注册 73 个内置工具。它们由 Go 原生实现或统一调度，Agent 会按需发现和调用，不会每轮把全部工具塞进 prompt。
+- `task_wait`：可中止的程序内等待，支持延时、文件存在、预期大小/校验和验证；不以文件暂时停止增长冒充下载完成。
+- `task_context`：保存长任务目标、进度、下一步、等待条件和已执行操作，随 checkpoint 恢复。
+- `computer_use`：本机桌面截图和鼠标键盘，支持 Windows、macOS（配套 helper）、Linux X11（xdotool + ImageMagick）；视觉模型闭环、会话独占、防重复执行。平台准备与限制见 [电脑操作说明](docs/Computer-Use.md)。
+
+
+当前版本注册 77 个内置工具。它们由 Go 原生实现或统一调度，Agent 会按需发现和调用，不会每轮把全部工具塞进 prompt。
 
 ### 按场景分类
 
@@ -1207,8 +1233,8 @@ TUI 是默认模式：
 | 配置审计 | `app_config_discover`、`db_config_audit`、`db_log_read`、`secret_scan`、`service_unit_audit`、`container_inventory` |
 | CTF / AWD / 跑分 | `flag_scan`、`awd_service_check`、`tsecbench` |
 | 脚本和文件 | `script_run`、`file_download`、`file_upload`、`archive_pack`、`archive_extract` |
-| 代理转发 | `tcp_forward`、`socks5_proxy` |
-| 自动化任务 | `schedule_task`、`inspection_run` |
+| 代理转发 | `tcp_forward`、`socks5_proxy`、`http_proxy` |
+| 自动化任务 | `task_wait`、`task_context`、`schedule_task`、`inspection_run` |
 | 扩展与配置 | `config_manage`、`skill_market`、`mcp_resource`、`mcp_prompt` |
 | Fleet 批量 | `fleet_inventory`、`fleet_exec`、`fleet_file` |
 
@@ -1239,6 +1265,7 @@ enabled_tools: []
 disabled_tools:
   - tcp_forward
   - socks5_proxy
+  - http_proxy
   - file_upload
   - script_run
 ```
@@ -1312,10 +1339,12 @@ VRP/Comware 的 `| include` / `exclude` 是区分大小写的“匹配行投影�
 | --- | --- |
 | `all` | 全部目标 |
 | `web-01` | 按 name |
-| `10.0.0.11` | 按 host |
+| `10.0.0.11` | 按 host（可省略端口） |
 | `ssh` / `telnet` / `ftp` | 按协议 |
 | `prod` / `web` | 按 tag |
-| `prod,ssh` | 同时匹配多个条件 |
+| `prod,ssh` | 同时满足 prod 标签和 ssh 协议（交集） |
+| `tag:prod,protocol:ssh` | 显式字段筛选，与上例等价 |
+| `prod|staging` | 匹配任一标签或名称（并集） |
 
 ### 常见任务
 
@@ -1359,6 +1388,8 @@ Agent 应调用：
 {"action":"tool","tool_name":"fleet_file","tool_args":{"selector":"target-01","action":"download","remote_path":"/tmp/flag.txt","local_path":"~/.deepsentry/workspace/flag.txt"}}
 ```
 
+多个目标下载时会在 `local_path` 后自动加 `.001-目标名`、`.002-目标名` 等后缀，避免目标文件相互覆盖；输出会列出每个实际保存路径。`fleet_file` 支持 `concurrency`（默认 5，最大 20）。AWD 探活可给 `awd_service_check` 传 `expected_status`、`contains` 和 `concurrency`，区分业务异常与单纯端口可达。
+
 需要每台机器独立分析时，优先使用子 Agent 的 `target_selector`，例如让 `log-analyst` 分别分析 `prod` 目标并汇总。
 
 ---
@@ -1370,19 +1401,37 @@ Agent 应调用：
 DeepSentry 会自动整理长会话，不需要用户反复复制前情：
 
 - 固定保留第一条真实用户目标和最新补充/修正；
-- 固定保留上一版成功摘要和会话核心线索；
+- 固定保留上一版成功摘要、会话核心线索，以及 `task_context` 记录的目标、进度、下一步、等待条件和已执行副作用；
+- 恢复会话后先核对实际状态，不把工作记录当成新的授权，也不重复已提交、已发送或已删除的动作；
 - 按模型的实际 token 窗口和预留输出动态决定何时压缩，1M 模型不再被固定 60K 字符阈值提前截断；
 - 早期命令、输出、文件变化、失败原因和 TODO 按 token 分块、分层摘要，巨大单条日志也不会只留首尾；
 - 近期原文数量随 profile 调整：`compact` 8 条、`balanced` 12 条、`full` 24 条，但 token 预算始终优先；
 - 摘要失败或 API 报上下文超限时，机械保留目标、最新修正、上次摘要、核心线索和最近步骤后自动重试一次；
 - `AGENTS.md`、Memory、Skills、MCP 说明和直接 Native Tool schema 都按 profile 分配预算，小模型优先获得短指令和任务相关工具。
 
-本地模型若未声明窗口，系统会保守按 32K 运行并在启动时提示。例如：
+本地模型可选择以下 OpenAI 兼容服务。初始化向导会用填入的地址和可选密钥读取 `/v1/models`，展示服务返回的模型 ID；服务尚未启动或不支持列举时，需手动填写实际 Model ID。这里的端口是各服务的常见默认值，若部署时更改了端口或加了反向代理，请以实际地址为准。
+
+| provider | 默认 API Base URL | 模型 ID |
+| --- | --- | --- |
+| `ollama` | `http://localhost:11434/v1` | `ollama list` 中的模型名 |
+| `lmstudio` | `http://localhost:1234/v1` | LM Studio 服务返回的 ID |
+| `vllm` | `http://localhost:8000/v1` | vLLM 服务返回的 ID |
+| `llamacpp` | `http://localhost:8080/v1` | llama-server 返回的 ID |
+| `sglang` | `http://localhost:30000/v1` | SGLang 服务返回的 ID |
+| `localai` | `http://localhost:8080/v1` | LocalAI 服务返回的 ID |
+
+其他实现了 OpenAI Chat Completions 的本地服务可用 `provider: custom`、`api_protocol: openai_chat` 接入。本地模型的 Agent 表现取决于**当前加载实例的上下文窗口、模型工具能力和服务端协议**。向导会读取 LM Studio 当前实例的 `context_length`、Ollama 运行中模型的 `context_length`；选择“自动”时采用这个实值。已有配置的 `context_window_tokens: 0` 也会在启动时读取当前实例，无法读取才按 32K 保守运行。模型卡宣称的最大长度不会覆盖运行时实际值。
+
+向导会根据 LM Studio 的 `trained_for_tool_use`、Ollama 和 LocalAI 的 `tools` 能力设置原生工具调用的建议默认值，并让你确认；未提供能力信息时默认保持 JSON 兼容路径。若现有配置将 `use_native_tools` 显式设为 `false`，程序尊重该选择；可重新运行 `--init` 或自行设为 `true`。JSON 兼容路径针对小模型提供动作示例，并可恢复部分本地聊天模板误输出的工具控制格式；所有恢复的命令仍走常规风险检查和执行流程。
+
+本地模型也能理解图片，但要看选中的模型及服务端是否启用了图片输入。向导查询 Ollama 的 `/api/show`、LM Studio 的 `/api/v1/models`、LocalAI 的 `/v1/models/capabilities`，并读取其他兼容服务 `/v1/models` 中明确给出的图片输入字段。仅有宽泛的 `multimodal` 标记不能确认图片输入；能力未知时仍可在向导中选择“支持图片理解”，或设置 `vision_mode: enabled`。更换本地模型后应重新检查这些能力设置。例如：
 
 ```yaml
 # 14B/20B/30B 通常保持 auto，会选 compact
 provider: ollama
-model_name: qwen2.5-14b-instruct
+api_url: http://127.0.0.1:11434/v1
+api_key: none
+model_name: qwen3:14b       # 用 /v1/models 返回的实际 ID 替换
 model_parameter_b: 14
 context_window_tokens: 32768   # 必须与 Ollama 实际 num_ctx 一致
 
@@ -1451,7 +1500,12 @@ context_window_tokens: 131072
 
 ```text
 reports/report_<timestamp>.md
+reports/report_<timestamp>.evidence.jsonl
 ```
+
+Markdown 按阅读顺序排列：用户原话、每一步的目标 / 风险 / 授权 / 摘要、最终结论、文末的风险统计。命令和工具的完整脱敏返回在同名 `.evidence.jsonl`。每条记录有 `E-000001` 这样的编号，后一条带上一条的 SHA256。报告末尾给出记录条数和末条摘要，用来核对档案没有被截掉。
+
+证据档案保存的是运行器实际返回、并且已经脱敏的内容。工具自己截断的输出、没有执行的步骤、被策略抹掉的密钥，都不能从档案里还原。会话如果是取消、失败、等待补充或达到步数上限，报告会单独写「会话结束」，这段不能当作排查结论。
 
 网页巡检再说「生成报告」时，会额外写出正式 Word，一般在：
 
@@ -1460,7 +1514,7 @@ reports/inspections/<时间>/report.docx
 reports/inspections/<时间>/report.md
 ```
 
-若你把输出目录配在 `build/reports` 下，路径会相应变化。会话 Markdown 含任务、动作和结论；巡检 Word 按「总体结论 → 巡检详情 → 总结与建议」排版并嵌入截图。聊天绑定密钥不在报告目录里，也不要把密钥文件提交到 Git。
+若你把输出目录配在 `build/reports` 下，路径会相应变化。转发报告时请连同 `.evidence.jsonl` 一起给，并先去掉真实地址和截图中的敏感信息。巡检 Word 按「总体结论 → 巡检详情 → 总结与建议」排版并嵌入截图。聊天绑定密钥不在报告目录里，也不要把密钥文件提交到 Git。
 
 ### 会话恢复
 
@@ -1507,9 +1561,12 @@ DeepSentry 的 Skill 加载规则很简单：一个目录就是一个 Skill，�
 默认加载目录：
 
 ```text
+可执行文件旁的 bundled-skills（发布包内置）
 ./skills
 ~/.deepsentry/skills
 ```
+
+内置目录按可执行文件位置查找，因而从其他工作目录启动发布包也能加载。配置 `skill_sources` 会替代 `./skills`，仍保留内置目录和用户管理目录；可用 `disabled_skill_sources` 按路径禁用。
 
 推荐目录结构：
 
@@ -1602,7 +1659,7 @@ mcp_servers:
 
 Agent 会协商 MCP 协议并分页读取 Tools、Resources、Resource Templates 与 Prompts；`list_changed` 会原子热刷新能力。MCP Tools 使用 Server 提供的 JSON Schema 作为一等原生函数暴露；紧凑 profile 会把有限 schema 预算分给与当前任务最相关及已经调用过的 MCP 工具，其余工具仍可通过 `agent_action` 按需调用。工具使用 `<server>__<tool>` 规范名，只有不冲突时才提供短别名，避免多个 Server 同名工具互相覆盖。
 
-HawkEye MCP 会启用 1.0.7 全部 51 工具的本地能力契约，而不只是通用 MCP 转发：紧凑模型会按当前意图选中抓包、拦截、Research、真实手势、视觉、播放、验证码或审计工具链；默认超时按工具提升到 100/130/205 秒。HawkEye 已连通时覆盖内置 `browser_browse`。B 站播放先加载 `bilibili-play`：倍速用 `video.playbackRate`，全屏用 `press_key f`，合集用 `?p=N`，全屏黑屏用 canvas 抓帧。常规浏览、标签页新建/选中、点击输入、trusted input、播放校验 JS、抓包启停以及拦截启停不再打断 Agent 弹确认；仅 Scope 变更、Replay/Fuzz、请求放行/丢弃、上传和任意 JS 等真正高风险动作保留强确认。需 `userActivation` 时明确使用 `clickMode/inputMode=trusted`，大页面把 `next_page_token` 作为 `page_token` 单独续读（1.0.7 拒绝数字 `cursor`）；拦截任务必须 `disable` 收尾，连接关闭时还有最后的防挂起清理。HawkEye 或其他 MCP 返回的图片会保存到 `reports/mcp-artifacts/`（可用 `DEEPSENTRY_MCP_ARTIFACT_DIR` 覆盖），校验哈希后作为下一轮视觉输入。安装、工具矩阵、工作流和 Firefox 真实输入排障见 [DeepSentry × Hx0 HawkEye MCP 深度适配](docs/HawkEye-MCP-深度适配.md)。
+HawkEye MCP 会启用 1.0.12 全部 51 工具的本地能力契约，而不只是通用 MCP 转发：紧凑模型会按当前意图选中抓包、拦截、Research、真实手势、视觉、播放、验证码或审计工具链；默认超时按工具提升到 100/130/205 秒。HawkEye 已连通时覆盖内置 `browser_browse`。B 站播放先加载 `bilibili-play`：倍速用 `video.playbackRate`，全屏用 `press_key f`，合集用 `?p=N`，全屏黑屏用 canvas 抓帧。常规浏览、标签页新建/选中、点击输入、trusted input、播放校验 JS、抓包启停以及拦截启停不再打断 Agent 弹确认；仅 Scope 变更、Replay/Fuzz、请求放行/丢弃、上传和任意 JS 等真正高风险动作保留强确认。需 `userActivation` 时明确使用 `clickMode/inputMode=trusted`，大页面把 `next_page_token` 作为 `page_token` 单独续读（1.0.12 拒绝数字 `cursor`）；拦截任务必须 `disable` 收尾，连接关闭时还有最后的防挂起清理。HawkEye 或其他 MCP 返回的图片会保存到 `reports/mcp-artifacts/`（可用 `DEEPSENTRY_MCP_ARTIFACT_DIR` 覆盖），校验哈希后作为下一轮视觉输入。安装、工具矩阵、工作流和 Firefox 真实输入排障见 [DeepSentry × Hx0 HawkEye MCP 深度适配](docs/HawkEye-MCP-深度适配.md)。
 
 FofaMap MCP 会启用 v2.0.1 全部 15 个工具的本地契约：资产查询先检查账户/字段，产品规则使用 `fofa_rules` 返回的 `app=`，查询先 `fofa_validate_query` 再 `fofa_search`，翻页原样传递 `next_cursor`（也接受该字段作为 `cursor` 别名）。`fofa_export`/`nuclei_plan` 的嵌套 `request` 可由扁平 `query`/`targets` 自动包装。只有用户明确授权主动扫描时才走 `nuclei_plan → 人工确认 → nuclei_execute`；查询类低风险、导出/计划中风险、执行扫描高风险。连接后先 `load_skill("fofamap")`。安装、密钥边界、stdio/HTTP 配置和完整工具矩阵见 [DeepSentry × FofaMap MCP 适配](docs/FofaMap-MCP-适配.md)。
 
@@ -1736,10 +1793,28 @@ email_from: "deepsentry@example.com"
 
 定时任务是持久化操作，当前采用保守意图门控：
 
-- 只有“提醒我”、“帮我”、“安排”、“定时”、“创建任务”或以重复/相对时间开头的直接指令才进入快速创建。
+- 在对话里说明任务和周期，由模型调用 `schedule_task` 创建。正文放 `task`，周期放 `interval_sec`（每分钟=60，每小时=3600）和 `repeat=interval`，单次时间放 `run_at`。程序不会从任务正文猜测时间。只在当前聊天发一句话时再带 `reply_text`，不需要 `allow_batch` 或 `confirm_unattended`。
 - 只出现“明天”、“几点”、“执行”等词不会落盘；安全题答案、日志、HTTP 记录和代码块会被排除。
-- `action=plan` 只预览；`action=add/create` 必须显式带 `confirm_create=true`。泛化 Agent 无人值守还需 `allow_batch=true` 和 `confirm_unattended=true`。
+- `action=plan` 只预览；`action=add/create` 必须显式带 `confirm_create=true`。真正无人值守执行的 Agent 任务还需 `allow_batch=true` 和 `confirm_unattended=true`。`reply_text` 不需要这两项。
+- 已建立的任务在 TUI 管理，不必再开一轮对话：
+
+```text
+/schedule
+/schedule show <id>
+/schedule edit <id> prompt=新的任务 every=1m
+/schedule cancel <id>
+/schedule resume <id>
+/schedule reset <id>
+/schedule delete <id>
+```
+
+`id` 可以是完整 ID，或能唯一匹配的前缀、名称。`cancel` 只停止以后的触发。`reset` 清除失败次数并重新安排；已经开始过的一次性任务可以用它再跑一次，但不会撤销已经做过的事。周期最短 60 秒，调度器默认约 30 秒检查一次。
 - 相同任务、执行时间、时区和重复规则的重复提交是幂等的，不会再写入一份。
+- `cancel` / `pause` 停止后续触发，不撤销已经开始的动作；任务仍在运行时不能 `resume` 或 `reset`。已经开始过的一次性任务不能靠 `resume` 重放，要用 `/schedule reset` 再安排一次。连续失败三次的周期任务会自动暂停。
+- 最多同时跑 3 个到期任务。长任务不会堵住其他已到期任务。单次 Agent 默认最多 2 小时，可用 `timeout_sec` 提高到 7 天。
+- 调度器只在进程存活且系统未休眠时触发。短延时和下载完成等待用 `task_wait`，不要用超长 sleep 冒充定时任务。
+- 用户要在当前聊天框按周期发一句话时，创建任务带 `reply_text`。到点调度器把这句话写入当前会话，不另起 Agent，也不只留报告。TUI 打开后只接收之后的新消息。`/schedule cancel` 停止后续发送。
+- 到点先把正文发进当前聊天，最后一行写本次完成时间；周期任务再在同一行写下次时间。只发一句话的任务也是那句话加上这一行时间。失败时另写一行未完成原因。
 
 邮件网关请求格式为 HTTP JSON POST：
 
@@ -1766,7 +1841,7 @@ email_from: "deepsentry@example.com"
 ./deepsentry --scheduler -c config.yaml
 ```
 
-查看、添加、删除、立即运行调度任务，也可以让 Agent 调用 `schedule_task` 工具完成。
+查看、修改、取消、重置、删除用 `/schedule`。也可以让 Agent 调用 `schedule_task` 的 `show`、`edit`、`cancel`、`reset`、`remove`。
 
 ## 从源码构建
 
@@ -1806,6 +1881,10 @@ Windows PowerShell 中可将输出名改为 `deepsentry.exe`。必须构建整�
 ```bash
 bash build.sh
 ```
+
+每次更新代码后统一运行 `bash build.sh`，不要只编译到带版本号的子目录。脚本会重新构建七个平台目标，并同步 `build/deepsentry`、`build/bin/deepsentry` 和项目根目录的默认启动文件；Windows 主机默认入口带 `.exe`。在 macOS 上还会重新编译 universal `computer-use-helper` 并同步到三个入口旁。脚本逐一比较默认入口与本机架构产物，防止启动旧版。
+
+`build/README.md`、`build/CHANGELOG.md`、`build/Computer-Use.md` 随构建同步，标准全平台 ZIP 包含这些文档与 `SHA256SUMS`。源码发布时也应先更新 README 与变更日志。配置、报告及历史版本目录保留，不会打入发布包。可用 `DEEPSENTRY_BUILD_LABEL=local-test bash build.sh` 指定本地构建标记，再用 `./build/deepsentry --version` 核对；构建标记不是版本发布记录。
 
 `build.sh` 会生成全平台二进制和 `build/SHA256SUMS`。发布前建议先运行 `go test ./...`，再执行构建和产物校验：
 
@@ -1945,6 +2024,7 @@ disabled_tools:
   - archive_extract
   - tcp_forward
   - socks5_proxy
+  - http_proxy
   - nmap_scan
   - cidr_scan
   - packet_capture
@@ -1976,7 +2056,7 @@ disabled_tools:
 - Telnet 和 `ftp_tls_mode: plain` 会明文传输凭据与数据，仅限受控隔离网；生产优先 SSH/SFTP 或开启严格证书校验的 FTPS。
 - 远程安全解压采用“下载到控制端 → 安全解压与核验 → 再上传”；直接在远程目标解压会被失败关闭。
 - WebShell 模式会自动批准动作，建议只在隔离环境或应急授权场景使用。
-- 高风险工具如 `script_run`、`file_upload`、`tcp_forward`、`socks5_proxy` 默认存在确认机制；无人值守时请先配置 `disabled_tools`。
+- 高风险工具如 `script_run`、`file_upload`、`tcp_forward`、`socks5_proxy`、`http_proxy` 默认存在确认机制；无人值守时请先配置 `disabled_tools`。
 - 已配置目标请使用 `fleet_exec` / `fleet_file` / `target_selector`，不要在 Agent 内裸跑 `ssh/scp/sftp` 访问目标。
 - 生成报告可能包含敏感路径、主机名、日志片段，公开前请脱敏。
 - 聊天绑定只授权本人私聊；群聊必须显式配置白名单。不要把绑定窗口链接转发到公网。
@@ -2002,7 +2082,7 @@ internal/security/      命令风险评估
 docs/操作手册.md          详细中文操作手册
 docs/聊天机器人接入.md    通讯工具绑定与指令
 docs/终端接入与每日巡检.md  无桌面绑定与巡检流程
-hawkeye-mcp-server.mjs   随附的 Hx0 鹰眼 MCP Server 1.0.7
+hawkeye-mcp-server.mjs   随附的 Hx0 鹰眼 MCP Server 1.0.12
 inspection.example.yaml  巡检设备清单（聊天 + 可选固定采集）
 config.example.yaml      配置模板
 build.sh                 一键交叉编译脚本
@@ -2018,11 +2098,11 @@ build.sh                 一键交叉编译脚本
 
 ## Credits
 
-DeepSentry v2.0.4 Ultimate is developed by [Hx0 Studio](https://hx0studio.com/).
+DeepSentry v2.0.5 Ultimate is developed by [Hx0 Studio](https://hx0studio.com/).
 
 同一工作室的配套产品：
 
-- [鹰眼 HawkEye](https://hx0studio.com/)：浏览器自动化，DeepSentry 已深度适配其 MCP 1.0.7
+- [鹰眼 HawkEye](https://hx0studio.com/)：浏览器自动化，DeepSentry 已深度适配其 MCP 1.0.12
 - [FofaMap](https://hx0studio.com/)：FOFA 资产测绘客户端，DeepSentry 已深度适配其 MCP v2.0.1
 
 Author: asaotomo

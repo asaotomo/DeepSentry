@@ -35,6 +35,8 @@ type SessionConfig struct {
 
 // Run 启动全屏 Agent TUI（支持多轮 follow-up）
 func Run(cfg SessionConfig) error {
+	restoreConsole := prepareConsoleDisplay()
+	defer restoreConsole()
 	if err := prepareSessionConfig(&cfg); err != nil {
 		return err
 	}
@@ -62,8 +64,10 @@ func Run(cfg SessionConfig) error {
 	m.restoreConversationHistory(*cfg.History)
 	m.refreshViewport()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion(), tea.WithOutput(newInputCursorOutput(os.Stdout, m.cursorAnchor)))
+	defer startConsoleResizeWatcher(p)()
 	ctrl.SetProgram(p)
 	defer startMacOSCmdVWatcher(p)()
+	defer startWindowsCtrlVWatcher(p)()
 
 	go ctrl.pumpEvents()
 

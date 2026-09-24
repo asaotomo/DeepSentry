@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"ai-edr/internal/config"
 )
@@ -23,6 +24,18 @@ func TestMatchTargets(t *testing.T) {
 	if got := MatchTargets(targets, "all"); len(got) != 3 {
 		t.Fatalf("all selector failed: %#v", got)
 	}
+	if got := MatchTargets(targets, "prod,ssh"); len(got) != 1 || got[0].Name != "web-01" {
+		t.Fatalf("selector intersection failed: %#v", got)
+	}
+	if got := MatchTargets(targets, "tag:prod|protocol:ftp"); len(got) != 2 {
+		t.Fatalf("selector union failed: %#v", got)
+	}
+	if got := MatchTargets(targets, "host:10.0.0.1"); len(got) != 1 || got[0].Name != "web-01" {
+		t.Fatalf("host without port failed: %#v", got)
+	}
+	if got := MatchTargets(targets, "prod,telnet"); len(got) != 0 {
+		t.Fatalf("overbroad selector unexpectedly matched: %#v", got)
+	}
 }
 
 func TestFormatFleetResults(t *testing.T) {
@@ -36,6 +49,14 @@ func TestFormatFleetResults(t *testing.T) {
 	}
 }
 
+func TestFleetTruncationPreservesUTF8(t *testing.T) {
+	value := strings.Repeat("界", 668)
+	got := truncateFleetOutput(value, 2000)
+	if !utf8.ValidString(got) || !strings.Contains(got, "已截断") {
+		t.Fatalf("invalid truncated output: %q", got)
+	}
+}
+
 func TestRunFleetRejectsFTPShellExec(t *testing.T) {
 	results := RunFleet([]config.TargetConfig{
 		{Name: "ftp-01", Protocol: "ftp", Host: "127.0.0.1:21"},
@@ -45,6 +66,16 @@ func TestRunFleetRejectsFTPShellExec(t *testing.T) {
 	}
 	if results[0].Success || !strings.Contains(results[0].Error, "FTP 目标不支持 shell 命令") {
 		t.Fatalf("expected ftp shell rejection, got %#v", results[0])
+	}
+}
+
+func TestRunFleetKeepsInventoryOrder(t *testing.T) {
+	results := RunFleet([]config.TargetConfig{
+		{Name: "same", Protocol: "ftp", Host: "first:21"},
+		{Name: "same", Protocol: "ftp", Host: "second:21"},
+	}, "all", "whoami", 2)
+	if len(results) != 2 || results[0].Target.Host != "first:21" || results[1].Target.Host != "second:21" {
+		t.Fatalf("results lost inventory order: %#v", results)
 	}
 }
 

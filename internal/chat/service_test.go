@@ -28,6 +28,7 @@ func testService(t *testing.T, run Runner) *Service {
 		t.Fatal(err)
 	}
 	s.listSessions = func(string) []chatSessionInfo { return nil }
+	s.pruneSessions = func(map[string]bool, time.Time) (int, error) { return 0, nil }
 	t.Cleanup(func() { s.stop(); s.wg.Wait() })
 	return s
 }
