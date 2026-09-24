@@ -28,7 +28,7 @@ v2.0.4 起也可以：
 1. 在 **微信、QQ、企业微信、飞书、钉钉** 里私聊指挥（验证码回原任务，高危操作当场确认）。
 2. 对设备 **Web 控制台做网页巡检**，保留真实截图，一句话生成带封面的 **Word / Markdown**。
 
-![DeepSentry v2.0.5 Ultimate 宣传图](assets/DeepSentry-v2.0.5-poster.png)
+<img width="1672" height="941" alt="DeepSentry v2.0.5 Ultimate 宣传图" src="https://github.com/user-attachments/assets/9b24d5ec-a9b8-4a06-a144-2c43de202be1" />
 
 > **授权范围**：只允许在你拥有或已获得明确书面授权的系统上使用。禁止未授权扫描、入侵、破坏、绕过访问控制或任何违法用途。
 
@@ -40,11 +40,11 @@ v2.0.4 起也可以：
 
 2.0.5 已发布。本节概览相对于 2.0.4 的主要变化；下载构建产物和校验值请前往 [GitHub Releases](https://github.com/asaotomo/DeepSentry/releases)。
 
-- **Agent 与多目标：**新增服务器/终端基线加固等专职子 Agent、独立子任务恢复点和有来源的线索协作；Fleet 与 AWD-Plus 可按目标和服务并行采证、分批处置。
-- **桌面与界面：**新增 Computer Use，改善 Windows 控制台和常驻 PowerShell helper，并修复旧截图误用、输入框鼠标报文和聊天流式显示问题。
-- **聊天与定时：**收紧高危操作确认，改善微信、QQ、钉钉等渠道的回复可靠性；周期提醒和定时 Agent/巡检结果可回到原会话，并由 `/schedule` 管理。
-- **报告与长任务：**Markdown 报告关联风险、授权与证据编号，同步保存 SHA256 串联的脱敏证据档案；检查点、`task_wait` 和 `task_context` 支持长任务继续执行。
-- **扩展与连接：**Skill 目录和调用策略修复、内置 Skill 随包分发；更新 HawkEye MCP 适配，并增加本机 SOCKS5/HTTP 代理服务。
+- **Agent 与多目标：** 新增服务器/终端基线加固等专职子 Agent、独立子任务恢复点和有来源的线索协作；Fleet 与 AWD-Plus 可按目标和服务并行采证、分批处置。
+- **桌面与界面：** 新增 Computer Use，改善 Windows 控制台和常驻 PowerShell helper，并修复旧截图误用、输入框鼠标报文和聊天流式显示问题。
+- **聊天与定时：** 收紧高危操作确认，改善微信、QQ、钉钉等渠道的回复可靠性；周期提醒和定时 Agent/巡检结果可回到原会话，并由 `/schedule` 管理。
+- **报告与长任务：** Markdown 报告关联风险、授权与证据编号，同步保存 SHA256 串联的脱敏证据档案；检查点、`task_wait` 和 `task_context` 支持长任务继续执行。
+- **扩展与连接：** Skill 目录和调用策略修复、内置 Skill 随包分发；更新 HawkEye MCP 适配，并增加本机 SOCKS5/HTTP 代理服务。
 
 Windows/Linux 真实桌面与完整视觉操作链仍需真机验收；Linux 桌面目前依赖 X11。详细变化和适用范围见 [更新日志](CHANGELOG.md) 与 [电脑操作说明](docs/Computer-Use.md)。
 
